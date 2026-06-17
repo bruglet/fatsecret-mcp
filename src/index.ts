@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 import createClient, { type Middleware } from 'openapi-fetch';
 import type { paths as PublicPaths } from './generated/public-api.js';
 import type { paths as ProfilePaths } from './generated/profile-api.js';
+import { buildGetFoodEntriesQuery } from './food-diary.js';
 import { buildOAuth1Params, requestToken, accessToken, type OAuth1Credentials } from './oauth1.js';
 import * as schemas from './schemas.js';
 
@@ -413,7 +414,7 @@ class FatSecretMcpServer {
       },
       async ({ date, ...rest }) => {
         const { data } = await this.profileClient.GET('/food-entries/v2', {
-          params: { query: { ...rest, date: optionalDateToDays(date), format: 'json' } },
+          params: { query: buildGetFoodEntriesQuery({ ...rest, date }) },
         });
         return text(data);
       },
