@@ -13,6 +13,7 @@ import * as schemas from './schemas.js';
 import { type Config, getConfigDir, getConfigPath, loadConfigFile, saveConfigFile } from './config.js';
 import { createMcpTransport } from './transport/streamable.js';
 import { cloudflareAccessAuth } from './auth-middleware.js';
+import { text } from './tool-output.js';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
@@ -27,10 +28,6 @@ function dateToDays(dateStr: string): number {
 
 function optionalDateToDays(dateStr?: string): number | undefined {
   return dateStr ? dateToDays(dateStr) : undefined;
-}
-
-function text(data: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
 }
 
 // ── Server ──
@@ -220,8 +217,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'search_foods',
       {
-        description: 'Search the FatSecret food database. Returns food names, descriptions, and basic nutrition info.',
+        description: 'Returns paginated food matches with IDs, serving options, nutrition, and any requested images, subcategories, or dietary attributes. Use when the user wants to find foods by name or needs a food_id before get_food, create_food_entry, or add_saved_meal_item; use autocomplete_foods only for lightweight query suggestions. Premier only.',
         inputSchema: schemas.SearchFoodsInputSchema,
+        outputSchema: schemas.SearchFoodsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async (args) => {
@@ -235,8 +233,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_food',
       {
-        description: 'Get detailed nutritional information for a specific food by ID. Returns servings, calories, macros, and micronutrients.',
+        description: 'Returns full food details and nutrition for each available serving. Use after search_foods, find_food_by_barcode, or a profile food-list tool when the user needs serving-level nutrition or a serving_id; do not use it for name discovery, and do not use derived serving_id 0 with create_food_entry.',
         inputSchema: schemas.GetFoodInputSchema,
+        outputSchema: schemas.GetFoodOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async (args) => {
@@ -250,8 +249,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'find_food_by_barcode',
       {
-        description: 'Find food by barcode (GTIN-13). UPC-A, EAN-13 and EAN-8 supported. Premier exclusive.',
+        description: 'Returns the food matching a barcode, including servings and nutrition. Use when the user provides a UPC-A, EAN-13, or EAN-8 barcode; pass it as 13-digit GTIN-13 and use search_foods instead for name-based lookup. Premier only; an unmatched barcode returns FatSecret error 211.',
         inputSchema: schemas.FindFoodByBarcodeInputSchema,
+        outputSchema: schemas.FindFoodByBarcodeOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async ({ barcode, ...rest }) => {
@@ -265,8 +265,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'autocomplete_foods',
       {
-        description: 'Get autocomplete suggestions for a partial food search expression. Premier exclusive.',
+        description: 'Returns short food-query suggestions for incomplete text, without food IDs or nutrition. Use when the user needs search-term completion, then pass a selected suggestion to search_foods; do not use this instead of a food search. Premier only and documented for the default region/language combination.',
         inputSchema: schemas.AutocompleteFoodsInputSchema,
+        outputSchema: schemas.AutocompleteFoodsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async (args) => {
@@ -284,8 +285,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'search_recipes',
       {
-        description: 'Search recipes with optional filters for calories, macros, prep time, and recipe types.',
+        description: 'Returns paginated recipe summaries with IDs, names, nutrition, ingredients, types, and available images. Use when the user wants recipe ideas or filtered recipe discovery; use get_recipe for full directions and get_recipe_types before applying type filters.',
         inputSchema: schemas.SearchRecipesInputSchema,
+        outputSchema: schemas.SearchRecipesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async (args) => {
@@ -299,8 +301,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_recipe',
       {
-        description: 'Get detailed recipe information by ID including ingredients, directions, and nutrition.',
+        description: 'Returns a recipe\'s full ingredients, directions, timing, serving information, images, and nutrition. Use after search_recipes or get_favorite_recipes when the user selected a recipe_id; do not use it to discover recipes.',
         inputSchema: schemas.GetRecipeInputSchema,
+        outputSchema: schemas.GetRecipeOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async (args) => {
@@ -318,8 +321,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_food_categories',
       {
-        description: 'Get the full list of food categories. Premier exclusive.',
+        description: 'Returns food category IDs, names, and descriptions. Use when the user asks to browse FatSecret\'s category taxonomy or when get_food_sub_categories needs a food_category_id; do not use it to search for foods. Premier only.',
         inputSchema: schemas.GetFoodCategoriesInputSchema,
+        outputSchema: schemas.GetFoodCategoriesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -333,8 +337,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_food_sub_categories',
       {
-        description: 'Get food sub categories for a given food category. Premier exclusive.',
+        description: 'Returns the subcategory names under one food category. Use after get_food_categories when the user wants to browse that taxonomy; it does not return foods or subcategory IDs. Premier only.',
         inputSchema: schemas.GetFoodSubCategoriesInputSchema,
+        outputSchema: schemas.GetFoodSubCategoriesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -348,8 +353,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_brands',
       {
-        description: 'Get the list of food brands, optionally filtered by starting letter and type. Premier exclusive.',
+        description: 'Returns food brand names, optionally filtered by initial character and manufacturer, restaurant, or supermarket type. Use for brand-directory requests; use search_foods to find actual branded foods because this tool returns no food IDs or nutrition. Premier only.',
         inputSchema: schemas.GetBrandsInputSchema,
+        outputSchema: schemas.GetBrandsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -363,8 +369,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_recipe_types',
       {
-        description: 'Get the full list of supported recipe type names.',
+        description: 'Returns the supported recipe type names. Use when the user wants to browse recipe categories or before search_recipes needs an exact, comma-separated recipe_types filter; it does not return recipes.',
         inputSchema: schemas.GetRecipeTypesInputSchema,
+        outputSchema: schemas.GetRecipeTypesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
@@ -382,8 +389,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_food_entries',
       {
-        description: 'Get food diary entries for a date or a specific entry by ID. Requires profile auth (check_auth_status first).',
+        description: 'Returns individual food diary entries and their nutrition for a date, or one entry by food_entry_id. Use when the user asks what they logged or when an edit/delete needs an entry ID; use get_food_entries_month for daily monthly totals instead. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetFoodEntriesInputSchema,
+        outputSchema: schemas.GetFoodEntriesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async ({ date, ...rest }) => {
@@ -397,8 +405,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_food_entries_month',
       {
-        description: 'Get daily nutrition summary for a month. Returns calories and macros per day. Requires profile auth (check_auth_status first).',
+        description: 'Returns daily calorie and macro totals for a month; days without diary entries are omitted. Use for monthly intake summaries or trends, not for individual foods or entry IDs—use get_food_entries for those. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetFoodEntriesMonthInputSchema,
+        outputSchema: schemas.GetFoodEntriesMonthOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async ({ date }) => {
@@ -412,8 +421,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'create_food_entry',
       {
-        description: 'Add a food diary entry. Requires food_id, serving_id, and meal type. Requires profile auth (check_auth_status first).',
+        description: 'Creates a food diary entry and returns the recorded entry with its ID and nutrition. Use when the user asks to log food; first use search_foods and get_food to obtain food_id and a real serving_id, because derived serving_id 0 cannot be logged. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CreateFoodEntryInputSchema,
+        outputSchema: schemas.CreateFoodEntryOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async ({ date, ...rest }) => {
@@ -427,8 +437,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'edit_food_entry',
       {
-        description: 'Edit an existing food diary entry. Cannot change the date. Requires profile auth (check_auth_status first).',
+        description: 'Updates an existing diary entry\'s label, serving, quantity, or meal. Use get_food_entries to obtain food_entry_id; this cannot change the entry date, so delete and recreate the entry to move it to another date. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.EditFoodEntryInputSchema,
+        outputSchema: schemas.EditFoodEntryOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async (args) => {
@@ -442,8 +453,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'delete_food_entry',
       {
-        description: 'Delete a food diary entry by ID. Requires profile auth (check_auth_status first).',
+        description: 'Permanently removes one food diary entry. Use when the user asks to delete a logged item, after get_food_entries provides its food_entry_id; do not use this to remove a favorite or saved-meal item. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.DeleteFoodEntryInputSchema,
+        outputSchema: schemas.DeleteFoodEntryOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -457,8 +469,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'copy_food_entries',
       {
-        description: 'Copy food entries from one date to another, optionally filtered by meal. Requires profile auth (check_auth_status first).',
+        description: 'Copies diary entries from one calendar date to another, optionally for only one meal bucket. Use when the user wants to repeat food they already logged on another date; use copy_saved_meal_entries instead when the source is a saved meal. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CopyFoodEntriesInputSchema,
+        outputSchema: schemas.CopyFoodEntriesOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async ({ from_date, to_date, ...rest }) => {
@@ -479,8 +492,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'copy_saved_meal_entries',
       {
-        description: 'Copy entries from a saved meal to a meal on a specific date. Requires profile auth (check_auth_status first).',
+        description: 'Copies every item in a saved meal into a selected diary meal and date. Use when the user wants to log a saved meal; obtain saved_meal_id from get_saved_meals, and use copy_food_entries instead to copy an existing diary date. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CopySavedMealEntriesInputSchema,
+        outputSchema: schemas.CopySavedMealEntriesOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async ({ date, ...rest }) => {
@@ -498,8 +512,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_favorite_foods',
       {
-        description: "Get the user's favorite foods. Requires profile auth (check_auth_status first).",
+        description: 'Returns the user\'s favorite foods with food IDs and saved serving details. Use when the user asks for favorites or when delete_favorite_food needs an exact favorite; use search_foods for the broader catalog. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetFavoriteFoodsInputSchema,
+        outputSchema: schemas.GetFavoriteFoodsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
@@ -513,8 +528,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'delete_favorite_food',
       {
-        description: "Remove a food from the user's favorites. Requires profile auth (check_auth_status first).",
+        description: 'Removes a food or serving-specific selection from the user\'s favorites and returns success status. Use get_favorite_foods first to obtain the stored food_id and any serving details; this does not delete diary entries. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.DeleteFavoriteFoodInputSchema,
+        outputSchema: schemas.DeleteFavoriteFoodOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -528,8 +544,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_most_eaten_foods',
       {
-        description: "Get the user's most eaten foods, optionally filtered by meal. Requires profile auth (check_auth_status first).",
+        description: 'Returns foods the user eats most often, including food and serving IDs, optionally for one meal bucket. Use for frequency-based suggestions; use get_recently_eaten_foods for recency, get_favorite_foods for explicit favorites, or search_foods for catalog search. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetMostEatenFoodsInputSchema,
+        outputSchema: schemas.GetMostEatenFoodsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -543,8 +560,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_recently_eaten_foods',
       {
-        description: "Get the user's recently eaten foods, optionally filtered by meal. Requires profile auth (check_auth_status first).",
+        description: 'Returns foods the user ate recently, including food and serving IDs, optionally for one meal bucket. Use for quick repeat-entry suggestions; use get_most_eaten_foods for frequency or get_food_entries for the actual dated diary record. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetRecentlyEatenFoodsInputSchema,
+        outputSchema: schemas.GetRecentlyEatenFoodsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -558,8 +576,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_favorite_recipes',
       {
-        description: "Get the user's favorite recipes. Requires profile auth (check_auth_status first).",
+        description: 'Returns the user\'s favorite recipes with recipe IDs and summary details. Use when the user asks for saved recipe favorites or when get_recipe/delete_favorite_recipe needs a recipe_id; use search_recipes to discover recipes outside favorites. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetFavoriteRecipesInputSchema,
+        outputSchema: schemas.GetFavoriteRecipesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
@@ -573,8 +592,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'add_favorite_recipe',
       {
-        description: "Add a recipe to the user's favorites. Requires profile auth (check_auth_status first).",
+        description: 'Adds an existing FatSecret recipe to the user\'s favorites and returns success status. Use after search_recipes or get_recipe provides recipe_id; this does not create a recipe or saved meal. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.AddFavoriteRecipeInputSchema,
+        outputSchema: schemas.AddFavoriteRecipeOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async (args) => {
@@ -588,8 +608,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'delete_favorite_recipe',
       {
-        description: "Remove a recipe from the user's favorites. Requires profile auth (check_auth_status first).",
+        description: 'Removes an existing recipe from the user\'s favorites and returns success status. Use get_favorite_recipes to obtain recipe_id; this does not delete the recipe itself or a saved meal. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.DeleteFavoriteRecipeInputSchema,
+        outputSchema: schemas.DeleteFavoriteRecipeOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -607,8 +628,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_saved_meals',
       {
-        description: "Get the user's saved meals, optionally filtered by meal type. Requires profile auth (check_auth_status first).",
+        description: 'Returns saved-meal IDs, names, descriptions, and suitable meal buckets, optionally filtered by meal. Use to browse saved-meal containers or obtain saved_meal_id; use get_saved_meal_items for the foods inside one. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetSavedMealsInputSchema,
+        outputSchema: schemas.GetSavedMealsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -622,8 +644,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'create_saved_meal',
       {
-        description: 'Create a new saved meal. Requires profile auth (check_auth_status first).',
+        description: 'Creates an empty saved-meal container and returns its new saved_meal_id. Use when the user wants a reusable meal, then call add_saved_meal_item for each food; use create_food_entry instead to log food directly to the diary. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CreateSavedMealInputSchema,
+        outputSchema: schemas.CreateSavedMealOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async (args) => {
@@ -637,8 +660,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'edit_saved_meal',
       {
-        description: 'Edit a saved meal name, description, or associated meals. Requires profile auth (check_auth_status first).',
+        description: 'Updates a saved meal\'s name, description, or suitable meal buckets. Use get_saved_meals to obtain saved_meal_id; this does not change the foods inside, which require the saved-meal item tools. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.EditSavedMealInputSchema,
+        outputSchema: schemas.EditSavedMealOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async (args) => {
@@ -652,8 +676,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'delete_saved_meal',
       {
-        description: 'Delete a saved meal. Requires profile auth (check_auth_status first).',
+        description: 'Permanently deletes a saved-meal container. Use after get_saved_meals identifies saved_meal_id; use delete_saved_meal_item when only one food should be removed. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.DeleteSavedMealInputSchema,
+        outputSchema: schemas.DeleteSavedMealOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -667,8 +692,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_saved_meal_items',
       {
-        description: 'Get all food items in a saved meal. Requires profile auth (check_auth_status first).',
+        description: 'Returns every item in one saved meal, including saved-meal item IDs, food and serving IDs, quantities, and nutrition. Use after get_saved_meals provides saved_meal_id, or before editing/deleting an item; this does not read dated diary entries. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetSavedMealItemsInputSchema,
+        outputSchema: schemas.GetSavedMealItemsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -682,8 +708,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'add_saved_meal_item',
       {
-        description: 'Add a food item to a saved meal. Requires profile auth (check_auth_status first).',
+        description: 'Adds a food and serving to a saved meal and returns the new saved_meal_item_id. Use get_saved_meals for saved_meal_id and search_foods/get_food for food_id and serving_id; use create_food_entry instead to log food directly. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.AddSavedMealItemInputSchema,
+        outputSchema: schemas.AddSavedMealItemOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async (args) => {
@@ -697,8 +724,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'edit_saved_meal_item',
       {
-        description: 'Edit a food item in a saved meal (name or units). Cannot change serving_id. Requires profile auth (check_auth_status first).',
+        description: 'Updates a saved-meal item\'s label or serving quantity. Use get_saved_meal_items to obtain saved_meal_item_id; serving_id cannot be changed, so delete and re-add the item to select another serving. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.EditSavedMealItemInputSchema,
+        outputSchema: schemas.EditSavedMealItemOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async (args) => {
@@ -712,8 +740,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'delete_saved_meal_item',
       {
-        description: 'Remove a food item from a saved meal. Requires profile auth (check_auth_status first).',
+        description: 'Permanently removes one food item from a saved meal. Use get_saved_meal_items to obtain saved_meal_item_id; use delete_saved_meal only when the entire meal should be removed. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.DeleteSavedMealItemInputSchema,
+        outputSchema: schemas.DeleteSavedMealItemOutputSchema,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
@@ -731,8 +760,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'update_weight',
       {
-        description: "Record the user's weight for a date. First weigh-in requires goal_weight_kg and current_height_cm. Requires profile auth (check_auth_status first).",
+        description: 'Records or replaces the user\'s weight for a date and returns success status. Use when the user asks to log a weigh-in; values are supplied in kilograms, and the first weigh-in also requires goal_weight_kg and current_height_cm. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.UpdateWeightInputSchema,
+        outputSchema: schemas.UpdateWeightOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async ({ date, ...rest }) => {
@@ -746,8 +776,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_weight_month',
       {
-        description: "Get the user's weight entries for a month. Requires profile auth (check_auth_status first).",
+        description: 'Returns recorded weigh-ins for a month with dates, kilogram values, and comments; days without weigh-ins are omitted. Use for a weight log or trend, not to record a value—use update_weight for that. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetWeightMonthInputSchema,
+        outputSchema: schemas.GetWeightMonthOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async ({ date }) => {
@@ -765,8 +796,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_exercises',
       {
-        description: 'Get the full list of supported exercise types and their IDs. Requires profile auth (check_auth_status first).',
+        description: 'Returns supported exercise type names and IDs. Use before edit_exercise_entries to resolve shift_from_id and shift_to_id, or when the user asks which activities are available; ID 0 represents a custom "Other" exercise. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetExercisesInputSchema,
+        outputSchema: schemas.GetExercisesOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
@@ -780,8 +812,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'edit_exercise_entries',
       {
-        description: 'Shift exercise time between activities for a date. Moves minutes from one exercise to another. Requires profile auth (check_auth_status first).',
+        description: 'Moves a number of minutes from one exercise activity to another for a date and returns success status; it does not set an absolute duration. Use get_exercises first for both IDs; custom "Other" exercises use ID 0 and require names, plus kcal for the destination. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.EditExerciseEntriesInputSchema,
+        outputSchema: schemas.EditExerciseEntriesOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async ({ date, ...rest }) => {
@@ -795,8 +828,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_exercise_entries_month',
       {
-        description: 'Get daily calories expended from exercise for a month. Requires profile auth (check_auth_status first).',
+        description: 'Returns estimated calories expended per day for a month; days without saved exercise entries are omitted. Use for monthly energy-expenditure summaries, not for activity-level entries or editing. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetExerciseEntriesMonthInputSchema,
+        outputSchema: schemas.GetExerciseEntriesMonthOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async ({ date }) => {
@@ -810,8 +844,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'save_exercise_template',
       {
-        description: "Save the current day's exercise entries as a template for specified days of the week. Requires profile auth (check_auth_status first).",
+        description: 'Copies one date\'s exercise entries into the default template for selected weekdays and returns success status. Use when the user wants that day\'s activity pattern reused on future matching weekdays; the source date must already contain the desired exercise entries. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.SaveExerciseTemplateInputSchema,
+        outputSchema: schemas.SaveExerciseTemplateOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async ({ date, ...rest }) => {
@@ -829,8 +864,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'get_profile',
       {
-        description: 'Get profile status information for the authenticated user. Requires profile auth (check_auth_status first).',
+        description: 'Returns the authenticated user\'s measurement preferences, latest weight details, goal weight, and height. Use when the user asks about FatSecret profile data; use check_auth_status instead to diagnose credentials or authorization. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.GetProfileInputSchema,
+        outputSchema: schemas.GetProfileOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
@@ -844,8 +880,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'create_food',
       {
-        description: 'Create a custom food with nutrition info. Premier exclusive. Requires profile auth (check_auth_status first).',
+        description: 'Creates a custom branded food from serving and nutrition data and returns its new food_id. Use when the requested food is absent from search_foods; this does not add it to the diary, so call create_food_entry afterward if needed. Premier only and requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CreateFoodInputSchema,
+        outputSchema: schemas.CreateFoodOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async (args) => {
@@ -863,8 +900,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'check_auth_status',
       {
-        description: 'Check if API credentials and profile authentication are configured. Call this first to understand what setup is needed.',
+        description: 'Returns whether API credentials are configured, whether profile OAuth is complete, the config path, and the next setup step. Use first when a tool reports an authentication problem or before profile operations; this reports local readiness, not the user\'s FatSecret profile data.',
         inputSchema: schemas.CheckAuthStatusInputSchema,
+        outputSchema: schemas.CheckAuthStatusOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
@@ -896,8 +934,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'setup_credentials',
       {
-        description: 'Configure FatSecret API credentials. Get them at https://platform.fatsecret.com/ → My Account → API Keys. Saves to persistent config file.',
+        description: 'Saves FatSecret API credentials and returns the config path. Use when check_auth_status reports missing credentials; obtain all three values from platform.fatsecret.com → My Account → API Keys, then use start_auth for profile access. Replacing credentials clears any existing profile authorization.',
         inputSchema: schemas.SetupCredentialsInputSchema,
+        outputSchema: schemas.SetupCredentialsOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async (rawArgs) => {
@@ -945,8 +984,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'start_auth',
       {
-        description: 'Start the OAuth 1.0 authorization flow for profile access. Returns an authorization URL the user must visit. Requires API credentials (setup_credentials first).',
+        description: 'Starts profile OAuth and returns an authorization URL for the user to open. Use after setup_credentials when check_auth_status reports that profile access is not authorized; after the user approves access, pass the displayed verifier to complete_auth.',
         inputSchema: schemas.StartAuthInputSchema,
+        outputSchema: schemas.StartAuthOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: false },
       },
       async () => {
@@ -967,8 +1007,9 @@ class FatSecretMcpServer {
     server.registerTool(
       'complete_auth',
       {
-        description: 'Complete the OAuth 1.0 flow with the verifier code from the authorization page.',
+        description: 'Exchanges the verifier from the current start_auth flow for saved profile access and returns the config path. Use only after the user opens start_auth\'s authorization URL and approves access; restarting the server or starting a new flow invalidates the pending in-memory flow.',
         inputSchema: schemas.CompleteAuthInputSchema,
+        outputSchema: schemas.CompleteAuthOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
       async ({ verifier }) => {
