@@ -1,0 +1,15 @@
+.git
+.gitignore
+.agents
+node_modules
+dist
+test
+quadlet
+.env
+.env.*
+*.log
+.DS_Store
+*.sh
+TEST_INFRA.md
+TEST_READY.md
+ORIGINAL_REQUEST.md

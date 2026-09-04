@@ -9,5 +9,6 @@ tsconfig.tsbuildinfo
 
 # AI files
 .claude/
+.agents/
 .mcpregistry_github_token
 .mcpregistry_registry_token

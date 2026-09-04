@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
+import express, { type Request as ExpressRequest, type Response as ExpressResponse, type NextFunction } from 'express';
+import type { Server as HttpServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import createClient, { type Middleware } from 'openapi-fetch';
 import type { paths as PublicPaths } from './generated/public-api.js';
@@ -12,6 +10,9 @@ import type { paths as ProfilePaths } from './generated/profile-api.js';
 import { buildGetFoodEntriesQuery } from './food-diary.js';
 import { buildOAuth1Params, requestToken, accessToken, type OAuth1Credentials } from './oauth1.js';
 import * as schemas from './schemas.js';
+import { type Config, getConfigDir, getConfigPath, loadConfigFile, saveConfigFile } from './config.js';
+import { createMcpTransport } from './transport/streamable.js';
+import { cloudflareAccessAuth } from './auth-middleware.js';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
@@ -32,20 +33,9 @@ function text(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-// ── Config ──
-
-interface Config {
-  clientId?: string;
-  clientSecret?: string;
-  consumerSecret?: string;
-  accessToken?: string;
-  accessTokenSecret?: string;
-}
-
 // ── Server ──
 
 class FatSecretMcpServer {
-  private server: McpServer;
   private clientId = '';
   private clientSecret = '';
 
@@ -89,8 +79,10 @@ class FatSecretMcpServer {
       },
     };
     this.profileClient.use(oauth1Middleware);
+  }
 
-    this.server = new McpServer(
+  public createMcpServer(): McpServer {
+    const server = new McpServer(
       { name: 'fatsecret-mcp', version },
       {
         instructions: [
@@ -107,42 +99,41 @@ class FatSecretMcpServer {
           '   These tools require OAuth 1.0 user authorization. Before using any profile tool,',
           '   call check_auth_status to see if the user is authenticated.',
           '   If not, guide them through: start_auth → user visits URL and authorizes → complete_auth with verifier PIN.',
-          '   All credentials and tokens persist across sessions in ~/.fatsecret-mcp/config.json.',
+          '   All credentials and tokens persist across sessions in ' + this.getConfigPath() + '.',
         ].join('\n'),
       },
     );
 
-    this.registerPublicFoodTools();
-    this.registerPublicRecipeTools();
-    this.registerPublicReferenceTools();
-    this.registerFoodDiaryTools();
-    this.registerFavoriteTools();
-    this.registerSavedMealTools();
-    this.registerWeightTools();
-    this.registerExerciseTools();
-    this.registerProfileTools();
-    this.registerAuthTools();
+    this.registerTools(server);
+    return server;
+  }
+
+  public registerTools(server: McpServer): void {
+    this.registerPublicFoodTools(server);
+    this.registerPublicRecipeTools(server);
+    this.registerPublicReferenceTools(server);
+    this.registerFoodDiaryTools(server);
+    this.registerFavoriteTools(server);
+    this.registerSavedMealTools(server);
+    this.registerWeightTools(server);
+    this.registerExerciseTools(server);
+    this.registerProfileTools(server);
+    this.registerAuthTools(server);
   }
 
   // ── Config Management ──
 
-  private getConfigDir(): string {
-    return join(homedir(), '.fatsecret-mcp');
+  public getConfigDir(): string {
+    return getConfigDir();
   }
 
-  private getConfigPath(): string {
-    return join(this.getConfigDir(), 'config.json');
+  public getConfigPath(): string {
+    return getConfigPath();
   }
 
   private loadConfig(): void {
     // 1. Load from persistent config file
-    let fileConfig: Config = {};
-    try {
-      fileConfig = JSON.parse(readFileSync(this.getConfigPath(), 'utf-8')) as Config;
-      console.error(`Loaded config from ${this.getConfigPath()}`);
-    } catch {
-      console.error(`No config file at ${this.getConfigPath()}`);
-    }
+    const fileConfig = loadConfigFile(this.getConfigPath());
 
     // 2. Apply: env vars override config file
     this.clientId = process.env.FATSECRET_CLIENT_ID || fileConfig.clientId || '';
@@ -166,25 +157,8 @@ class FatSecretMcpServer {
     console.error(`OAuth 1.0 tokens: ${fileConfig.accessToken ? 'loaded from config file' : 'not set'}`);
   }
 
-  private saveConfig(updates: Partial<Config>): void {
-    const dir = this.getConfigDir();
-    mkdirSync(dir, { recursive: true });
-
-    // Read existing config, merge updates
-    let existing: Config = {};
-    try {
-      existing = JSON.parse(readFileSync(this.getConfigPath(), 'utf-8')) as Config;
-    } catch {
-      // No existing config
-    }
-
-    const merged = { ...existing, ...updates };
-    // Remove keys explicitly set to undefined
-    for (const key of Object.keys(merged) as (keyof Config)[]) {
-      if (merged[key] === undefined) delete merged[key];
-    }
-    writeFileSync(this.getConfigPath(), JSON.stringify(merged, null, 2));
-    console.error(`Saved config to ${this.getConfigPath()}`);
+  public saveConfig(updates: Partial<Config>): Config {
+    return saveConfigFile(updates, this.getConfigPath());
   }
 
   private hasApiCredentials(): boolean {
@@ -242,8 +216,8 @@ class FatSecretMcpServer {
 
   // ── Public API – Foods ──
 
-  private registerPublicFoodTools(): void {
-    this.server.registerTool(
+  private registerPublicFoodTools(server: McpServer): void {
+    server.registerTool(
       'search_foods',
       {
         description: 'Search the FatSecret food database. Returns food names, descriptions, and basic nutrition info.',
@@ -258,7 +232,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_food',
       {
         description: 'Get detailed nutritional information for a specific food by ID. Returns servings, calories, macros, and micronutrients.',
@@ -273,7 +247,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'find_food_by_barcode',
       {
         description: 'Find food by barcode (GTIN-13). UPC-A, EAN-13 and EAN-8 supported. Premier exclusive.',
@@ -288,7 +262,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'autocomplete_foods',
       {
         description: 'Get autocomplete suggestions for a partial food search expression. Premier exclusive.',
@@ -306,8 +280,8 @@ class FatSecretMcpServer {
 
   // ── Public API – Recipes ──
 
-  private registerPublicRecipeTools(): void {
-    this.server.registerTool(
+  private registerPublicRecipeTools(server: McpServer): void {
+    server.registerTool(
       'search_recipes',
       {
         description: 'Search recipes with optional filters for calories, macros, prep time, and recipe types.',
@@ -322,7 +296,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_recipe',
       {
         description: 'Get detailed recipe information by ID including ingredients, directions, and nutrition.',
@@ -340,8 +314,8 @@ class FatSecretMcpServer {
 
   // ── Public API – Reference Data ──
 
-  private registerPublicReferenceTools(): void {
-    this.server.registerTool(
+  private registerPublicReferenceTools(server: McpServer): void {
+    server.registerTool(
       'get_food_categories',
       {
         description: 'Get the full list of food categories. Premier exclusive.',
@@ -356,7 +330,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_food_sub_categories',
       {
         description: 'Get food sub categories for a given food category. Premier exclusive.',
@@ -371,7 +345,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_brands',
       {
         description: 'Get the list of food brands, optionally filtered by starting letter and type. Premier exclusive.',
@@ -386,7 +360,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_recipe_types',
       {
         description: 'Get the full list of supported recipe type names.',
@@ -404,8 +378,8 @@ class FatSecretMcpServer {
 
   // ── Profile API – Food Diary ──
 
-  private registerFoodDiaryTools(): void {
-    this.server.registerTool(
+  private registerFoodDiaryTools(server: McpServer): void {
+    server.registerTool(
       'get_food_entries',
       {
         description: 'Get food diary entries for a date or a specific entry by ID. Requires profile auth (check_auth_status first).',
@@ -420,7 +394,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_food_entries_month',
       {
         description: 'Get daily nutrition summary for a month. Returns calories and macros per day. Requires profile auth (check_auth_status first).',
@@ -435,7 +409,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'create_food_entry',
       {
         description: 'Add a food diary entry. Requires food_id, serving_id, and meal type. Requires profile auth (check_auth_status first).',
@@ -450,7 +424,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'edit_food_entry',
       {
         description: 'Edit an existing food diary entry. Cannot change the date. Requires profile auth (check_auth_status first).',
@@ -465,7 +439,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'delete_food_entry',
       {
         description: 'Delete a food diary entry by ID. Requires profile auth (check_auth_status first).',
@@ -480,7 +454,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'copy_food_entries',
       {
         description: 'Copy food entries from one date to another, optionally filtered by meal. Requires profile auth (check_auth_status first).',
@@ -502,7 +476,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'copy_saved_meal_entries',
       {
         description: 'Copy entries from a saved meal to a meal on a specific date. Requires profile auth (check_auth_status first).',
@@ -520,8 +494,8 @@ class FatSecretMcpServer {
 
   // ── Profile API – Favorites ──
 
-  private registerFavoriteTools(): void {
-    this.server.registerTool(
+  private registerFavoriteTools(server: McpServer): void {
+    server.registerTool(
       'get_favorite_foods',
       {
         description: "Get the user's favorite foods. Requires profile auth (check_auth_status first).",
@@ -536,7 +510,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'delete_favorite_food',
       {
         description: "Remove a food from the user's favorites. Requires profile auth (check_auth_status first).",
@@ -551,7 +525,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_most_eaten_foods',
       {
         description: "Get the user's most eaten foods, optionally filtered by meal. Requires profile auth (check_auth_status first).",
@@ -566,7 +540,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_recently_eaten_foods',
       {
         description: "Get the user's recently eaten foods, optionally filtered by meal. Requires profile auth (check_auth_status first).",
@@ -581,7 +555,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_favorite_recipes',
       {
         description: "Get the user's favorite recipes. Requires profile auth (check_auth_status first).",
@@ -596,7 +570,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'add_favorite_recipe',
       {
         description: "Add a recipe to the user's favorites. Requires profile auth (check_auth_status first).",
@@ -611,7 +585,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'delete_favorite_recipe',
       {
         description: "Remove a recipe from the user's favorites. Requires profile auth (check_auth_status first).",
@@ -629,8 +603,8 @@ class FatSecretMcpServer {
 
   // ── Profile API – Saved Meals ──
 
-  private registerSavedMealTools(): void {
-    this.server.registerTool(
+  private registerSavedMealTools(server: McpServer): void {
+    server.registerTool(
       'get_saved_meals',
       {
         description: "Get the user's saved meals, optionally filtered by meal type. Requires profile auth (check_auth_status first).",
@@ -645,7 +619,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'create_saved_meal',
       {
         description: 'Create a new saved meal. Requires profile auth (check_auth_status first).',
@@ -660,7 +634,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'edit_saved_meal',
       {
         description: 'Edit a saved meal name, description, or associated meals. Requires profile auth (check_auth_status first).',
@@ -675,7 +649,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'delete_saved_meal',
       {
         description: 'Delete a saved meal. Requires profile auth (check_auth_status first).',
@@ -690,7 +664,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_saved_meal_items',
       {
         description: 'Get all food items in a saved meal. Requires profile auth (check_auth_status first).',
@@ -705,7 +679,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'add_saved_meal_item',
       {
         description: 'Add a food item to a saved meal. Requires profile auth (check_auth_status first).',
@@ -720,7 +694,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'edit_saved_meal_item',
       {
         description: 'Edit a food item in a saved meal (name or units). Cannot change serving_id. Requires profile auth (check_auth_status first).',
@@ -735,7 +709,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'delete_saved_meal_item',
       {
         description: 'Remove a food item from a saved meal. Requires profile auth (check_auth_status first).',
@@ -753,8 +727,8 @@ class FatSecretMcpServer {
 
   // ── Profile API – Weight ──
 
-  private registerWeightTools(): void {
-    this.server.registerTool(
+  private registerWeightTools(server: McpServer): void {
+    server.registerTool(
       'update_weight',
       {
         description: "Record the user's weight for a date. First weigh-in requires goal_weight_kg and current_height_cm. Requires profile auth (check_auth_status first).",
@@ -769,7 +743,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_weight_month',
       {
         description: "Get the user's weight entries for a month. Requires profile auth (check_auth_status first).",
@@ -787,8 +761,8 @@ class FatSecretMcpServer {
 
   // ── Profile API – Exercise ──
 
-  private registerExerciseTools(): void {
-    this.server.registerTool(
+  private registerExerciseTools(server: McpServer): void {
+    server.registerTool(
       'get_exercises',
       {
         description: 'Get the full list of supported exercise types and their IDs. Requires profile auth (check_auth_status first).',
@@ -803,7 +777,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'edit_exercise_entries',
       {
         description: 'Shift exercise time between activities for a date. Moves minutes from one exercise to another. Requires profile auth (check_auth_status first).',
@@ -818,7 +792,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'get_exercise_entries_month',
       {
         description: 'Get daily calories expended from exercise for a month. Requires profile auth (check_auth_status first).',
@@ -833,7 +807,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'save_exercise_template',
       {
         description: "Save the current day's exercise entries as a template for specified days of the week. Requires profile auth (check_auth_status first).",
@@ -851,8 +825,8 @@ class FatSecretMcpServer {
 
   // ── Profile API – Profile & Custom Food ──
 
-  private registerProfileTools(): void {
-    this.server.registerTool(
+  private registerProfileTools(server: McpServer): void {
+    server.registerTool(
       'get_profile',
       {
         description: 'Get profile status information for the authenticated user. Requires profile auth (check_auth_status first).',
@@ -867,7 +841,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'create_food',
       {
         description: 'Create a custom food with nutrition info. Premier exclusive. Requires profile auth (check_auth_status first).',
@@ -885,8 +859,8 @@ class FatSecretMcpServer {
 
   // ── Auth Tools ──
 
-  private registerAuthTools(): void {
-    this.server.registerTool(
+  private registerAuthTools(server: McpServer): void {
+    server.registerTool(
       'check_auth_status',
       {
         description: 'Check if API credentials and profile authentication are configured. Call this first to understand what setup is needed.',
@@ -919,14 +893,26 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'setup_credentials',
       {
         description: 'Configure FatSecret API credentials. Get them at https://platform.fatsecret.com/ → My Account → API Keys. Saves to persistent config file.',
         inputSchema: schemas.SetupCredentialsInputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
-      async ({ client_id, client_secret, consumer_secret }) => {
+      async (rawArgs) => {
+        const args = rawArgs as {
+          client_id?: string;
+          client_secret?: string;
+          consumer_secret?: string;
+          clientId?: string;
+          clientSecret?: string;
+          consumerSecret?: string;
+        };
+        const client_id = args.client_id || args.clientId || '';
+        const client_secret = args.client_secret || args.clientSecret || '';
+        const consumer_secret = args.consumer_secret || args.consumerSecret || '';
+
         this.clientId = client_id;
         this.clientSecret = client_secret;
         this.oauth1Credentials.consumerKey = client_id;
@@ -956,7 +942,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'start_auth',
       {
         description: 'Start the OAuth 1.0 authorization flow for profile access. Returns an authorization URL the user must visit. Requires API credentials (setup_credentials first).',
@@ -978,7 +964,7 @@ class FatSecretMcpServer {
       },
     );
 
-    this.server.registerTool(
+    server.registerTool(
       'complete_auth',
       {
         description: 'Complete the OAuth 1.0 flow with the verifier code from the authorization page.',
@@ -1009,12 +995,73 @@ class FatSecretMcpServer {
 
   // ── Run ──
 
-  async run(): Promise<void> {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('FatSecret MCP server running on stdio');
+  async run(portOverride?: number): Promise<HttpServer> {
+    const app = express();
+    app.use(express.json({ limit: '4mb' }));
+
+    // JSON parse error handling middleware
+    app.use((err: unknown, _req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+      if (err) {
+        const status = (typeof err === 'object' && err !== null && 'status' in err && typeof (err as { status: unknown }).status === 'number')
+          ? (err as { status: number }).status
+          : 400;
+        res.status(status).json({
+          jsonrpc: '2.0',
+          error: { code: status === 413 ? -32000 : -32700, message: (err as Error).message || 'Invalid JSON' },
+          id: null,
+        });
+        return;
+      }
+      next();
+    });
+
+    // Feature 1: Public Health Check
+    app.get('/health', (_req: ExpressRequest, res: ExpressResponse) => {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.status(200).json({ status: 'ok' });
+    });
+
+    app.head('/health', (_req: ExpressRequest, res: ExpressResponse) => {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.status(200).end();
+    });
+
+    // Feature 2: MCP Streamable HTTP Transport
+    const mcpTransport = createMcpTransport({
+      createServer: () => this.createMcpServer(),
+    });
+    app.use('/mcp', cloudflareAccessAuth, mcpTransport.router);
+
+    const port = portOverride || parseInt(process.env.PORT || '3000', 10);
+    const host = process.env.HOST || '0.0.0.0';
+
+    return new Promise((resolve, reject) => {
+      const httpServer = app.listen(port, host, () => {
+        console.error(`FatSecret MCP server running at http://${host}:${port}`);
+        console.error(`Health check available at http://${host}:${port}/health`);
+        console.error(`MCP endpoint available at http://${host}:${port}/mcp`);
+        resolve(httpServer);
+      });
+
+      httpServer.on('error', reject);
+
+      const shutdown = async () => {
+        console.error('Shutting down FatSecret MCP server...');
+        await mcpTransport.closeAllSessions();
+        httpServer.close(() => {
+          console.error('Server stopped cleanly');
+          process.exit(0);
+        });
+        setTimeout(() => process.exit(1), 5000).unref();
+      };
+
+      process.on('SIGTERM', shutdown);
+      process.on('SIGINT', shutdown);
+    });
   }
 }
+
+export { FatSecretMcpServer };
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
@@ -1024,4 +1071,7 @@ process.on('unhandledRejection', (err) => {
 });
 
 const server = new FatSecretMcpServer();
-server.run().catch(console.error);
+server.run().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});

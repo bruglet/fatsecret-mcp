@@ -203,6 +203,102 @@ Debugging with MCP Inspector:
 
 ```bash
 FATSECRET_CLIENT_ID=X FATSECRET_CLIENT_SECRET=X FATSECRET_CONSUMER_SECRET=X npx -y @modelcontextprotocol/inspector npx <local-path>/fatsecret-mcp
+## 🐳 Deployment with Podman Quadlet & Cloudflare Tunnel
+
+Deploy the MCP server as a rootless container managed by systemd and exposed securely through a Cloudflare Tunnel with Cloudflare Access Managed OAuth.
+
+### Architecture
+
+```
+[ AI Client / Claude / Cursor ]
+               │
+               ▼  (OAuth 2.0 / HTTPS)
+[ Cloudflare Access & Managed OAuth ]
+               │
+               ▼  (Tunnel with Cf-Access-Jwt-Assertion)
+[ cloudflared on Server ]
+               │
+               ▼  (HTTP reverse proxy to 127.0.0.1:3000)
+[ Rootless Podman Quadlet (fatsecret-mcp) ]
+  ├── GET  /health (Public health check)
+  └── POST /mcp    (Streamable HTTP - JWT verified)
+```
+
+### 1. Prepare Environment and Storage
+
+Create the configuration directory and storage mount:
+
+```bash
+mkdir -p ~/.config/containers/systemd
+mkdir -p ~/.config/fatsecret-mcp/data
+cp .env.example ~/.config/fatsecret-mcp/.env
+```
+
+Edit `~/.config/fatsecret-mcp/.env` with your credentials:
+- `CF_ACCESS_TEAM_DOMAIN`: your Cloudflare Access team name or domain (e.g. `myteam.cloudflareaccess.com`)
+- `CF_ACCESS_AUD`: your application audience tag from Cloudflare Zero Trust
+- `FATSECRET_CLIENT_ID`, `FATSECRET_CLIENT_SECRET`, `FATSECRET_CONSUMER_SECRET`: from [platform.fatsecret.com](https://platform.fatsecret.com/)
+
+### 2. Install the Quadlet
+
+Copy the Quadlet definition to the user systemd directory:
+
+```bash
+cp quadlet/fatsecret-mcp.container ~/.config/containers/systemd/
+```
+
+### 3. Start the Service
+
+Reload the systemd user daemon and start the container:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user start fatsecret-mcp
+```
+
+Check status and logs:
+
+```bash
+systemctl --user status fatsecret-mcp
+journalctl --user -u fatsecret-mcp -f
+```
+
+To enable starting automatically on user login / boot:
+
+```bash
+systemctl --user enable fatsecret-mcp
+loginctl enable-linger $USER
+```
+
+### 4. Cloudflare Tunnel Configuration
+
+Add an ingress rule in your `cloudflared` configuration (`config.yml`):
+
+```yaml
+ingress:
+  - hostname: mcp.yourdomain.com
+    service: http://127.0.0.1:3000
+  - service: http_status:404
+```
+
+In the Cloudflare Zero Trust dashboard:
+1. Navigate to **Access → Applications**.
+2. Add an application protecting `mcp.yourdomain.com`.
+3. Enable **Managed OAuth** to allow non-browser MCP clients to authenticate.
+4. Copy the **Audience Tag (AUD)** into your `.env` file as `CF_ACCESS_AUD`.
+
+### 5. Connect Your MCP Client
+
+Configure your MCP client (such as Claude Desktop or Cursor) to connect via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "fatsecret": {
+      "url": "https://mcp.yourdomain.com/mcp"
+    }
+  }
+}
 ```
 
 ## 📄 License
