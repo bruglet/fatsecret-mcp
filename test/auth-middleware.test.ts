@@ -123,6 +123,37 @@ describe('Cloudflare Access JWT Middleware', () => {
     assert.equal((req.user as { email: string }).email, 'user@example.com');
   });
 
+  it('authenticates a service-token assertion with an empty subject and no email', async () => {
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const token = await new SignJWT({ sub: '', common_name: 'service-token.access' })
+      .setProtectedHeader({ alg: 'RS256', kid: 'test-key-service' })
+      .setIssuedAt()
+      .setIssuer(issuer)
+      .setAudience(audience)
+      .setExpirationTime('2h')
+      .sign(privateKey);
+
+    const middleware = createAuthMiddleware({
+      skipAuth: false,
+      teamDomain,
+      audience,
+      jwks: async () => publicKey,
+    });
+    const req = {
+      headers: { 'cf-access-jwt-assertion': token },
+    } as unknown as Request & { user?: unknown };
+    const res = createMockRes();
+    let nextCalled = false;
+
+    await middleware(req, res as unknown as Response, () => {
+      nextCalled = true;
+    });
+
+    assert.equal(nextCalled, true);
+    assert.equal(res.statusCode, 200);
+    assert.equal((req.user as { common_name: string }).common_name, 'service-token.access');
+  });
+
   it('authenticates valid token from Authorization: Bearer header', async () => {
     const { privateKey, publicKey } = await generateKeyPair('RS256');
     const token = await new SignJWT({ sub: 'user_456' })
