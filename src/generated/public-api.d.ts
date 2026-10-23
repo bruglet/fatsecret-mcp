@@ -34,7 +34,7 @@ export interface paths {
                      * @description required
                      * @example 9300675079655
                      */
-                    barcode?: number;
+                    barcode?: string;
                     /**
                      * @description optional, default xml
                      * @example json
@@ -127,7 +127,7 @@ export interface paths {
                      * @description required
                      * @example 9300675079655
                      */
-                    barcode?: number;
+                    barcode?: string;
                     /**
                      * @description optional, default xml
                      * @example json

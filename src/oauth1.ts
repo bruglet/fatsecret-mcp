@@ -23,6 +23,17 @@ const REQUEST_TOKEN_URL = `${OAUTH1_BASE_URL}/request_token`;
 const AUTHORIZE_URL = `${OAUTH1_BASE_URL}/authorize`;
 const ACCESS_TOKEN_URL = `${OAUTH1_BASE_URL}/access_token`;
 
+async function fetchOAuth(url: string, fetcher: typeof globalThis.fetch): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetcher(url, { method: 'GET', signal: AbortSignal.timeout(30_000) });
+  } catch {
+    throw new Error('OAuth request failed or timed out. Check network access and the server IP allowlist.');
+  }
+  if (!response.ok) throw new Error(`OAuth request failed with HTTP ${response.status}. Check credentials, the server clock, and authorization permissions.`);
+  return response;
+}
+
 function percentEncode(str: string): string {
   return encodeURIComponent(str).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
@@ -85,18 +96,12 @@ export function buildOAuth1Params(
 
 export async function requestToken(
   credentials: OAuth1Credentials,
+  fetcher: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<OAuth1RequestTokenResult> {
   const params = buildOAuth1Params('GET', REQUEST_TOKEN_URL, credentials, { oauth_callback: 'oob' });
   const qs = new URLSearchParams(params).toString();
 
-  const response = await fetch(`${REQUEST_TOKEN_URL}?${qs}`, {
-    method: 'GET',
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to get request token: ${response.status} ${text}`);
-  }
+  const response = await fetchOAuth(`${REQUEST_TOKEN_URL}?${qs}`, fetcher);
 
   const responseBody = await response.text();
   const responseParams = new URLSearchParams(responseBody);
@@ -104,7 +109,7 @@ export async function requestToken(
   const oauthTokenSecret = responseParams.get('oauth_token_secret');
 
   if (!oauthToken || !oauthTokenSecret) {
-    throw new Error(`Invalid request token response: ${responseBody}`);
+    throw new Error('The OAuth service omitted the request token or secret. Start authorization again.');
   }
 
   return {
@@ -119,6 +124,7 @@ export async function accessToken(
   oauthToken: string,
   oauthTokenSecret: string,
   verifier: string,
+  fetcher: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<OAuth1AccessTokenResult> {
   const tokenCredentials: OAuth1Credentials = {
     ...credentials,
@@ -129,14 +135,7 @@ export async function accessToken(
   const params = buildOAuth1Params('GET', ACCESS_TOKEN_URL, tokenCredentials, { oauth_verifier: verifier });
   const qs = new URLSearchParams(params).toString();
 
-  const response = await fetch(`${ACCESS_TOKEN_URL}?${qs}`, {
-    method: 'GET',
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to get access token: ${response.status} ${text}`);
-  }
+  const response = await fetchOAuth(`${ACCESS_TOKEN_URL}?${qs}`, fetcher);
 
   const responseBody = await response.text();
   const responseParams = new URLSearchParams(responseBody);
@@ -144,7 +143,7 @@ export async function accessToken(
   const accessTokenSecretValue = responseParams.get('oauth_token_secret');
 
   if (!accessTokenValue || !accessTokenSecretValue) {
-    throw new Error(`Invalid access token response: ${responseBody}`);
+    throw new Error('The OAuth service omitted the access token or secret. Start authorization again.');
   }
 
   return {

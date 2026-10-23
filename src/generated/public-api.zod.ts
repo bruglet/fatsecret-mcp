@@ -7,7 +7,7 @@ export const get__food_barcode_findById_v2 = {
   requestFormat: z.literal("json"),
   parameters: z.object({
     query: z.object({
-      barcode: z.number().optional(),
+      barcode: z.string().optional(),
       format: z.string().optional(),
       region: z.string().optional(),
       language: z.string().optional(),
@@ -32,7 +32,7 @@ export const get__food_barcode_findById_v1 = {
   requestFormat: z.literal("json"),
   parameters: z.object({
     query: z.object({
-      barcode: z.number().optional(),
+      barcode: z.string().optional(),
       format: z.string().optional(),
       region: z.string().optional(),
       language: z.string().optional(),

@@ -17,8 +17,8 @@ export interface McpRouterContext {
 
 export function createMcpTransport(options: StreamableTransportOptions): McpRouterContext {
   const router = express.Router();
-  const transports: Record<string, StreamableHTTPServerTransport> = {};
-  const servers: Record<string, McpServer> = {};
+  const transports: Record<string, StreamableHTTPServerTransport> = Object.create(null);
+  const servers: Record<string, McpServer> = Object.create(null);
 
   const cleanSession = async (sessionId: string) => {
     delete transports[sessionId];

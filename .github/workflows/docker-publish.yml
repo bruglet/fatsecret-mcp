@@ -1,6 +1,7 @@
 name: Build and Publish Container Image
 
 on:
+  pull_request:
   push:
     branches: [ "master" ]
     tags: [ "v*.*.*" ]
@@ -11,7 +12,25 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run type-check
+      - run: env -u MCP_SERVER_URL -u USE_REAL_SERVER -u FATSECRET_CLIENT_ID -u FATSECRET_CLIENT_SECRET -u FATSECRET_CONSUMER_SECRET npm test
+      - run: npm run build
+
   build-and-push:
+    if: github.event_name != 'pull_request'
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read

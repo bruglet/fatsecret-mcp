@@ -17,7 +17,7 @@ const ROOT = join(__dirname, '..');
 interface PostmanItem {
   name: string;
   item?: PostmanItem[];
-  request?: unknown;
+  request?: { method?: string; url?: string | { raw?: string }; [key: string]: unknown };
   description?: string;
 }
 
@@ -51,6 +51,9 @@ function filterDeprecated(items: PostmanItem[]): PostmanItem[] {
     .filter((item) => !item.name.toLowerCase().includes('deprecated'))
     .map((item) => ({
       ...item,
+      // Correct the upstream collection method to match food.delete_favorite documentation.
+      request: item.name === 'Delete favorite v1' && item.request
+        ? { ...item.request, method: 'DELETE' } : item.request,
       item: item.item ? filterDeprecated(item.item) : undefined,
     }));
 }

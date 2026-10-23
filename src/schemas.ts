@@ -1,12 +1,20 @@
 import { z } from 'zod';
 import * as pub from './generated/public-api.zod.js';
 import * as profile from './generated/profile-api.zod.js';
+import { normalizeResponse } from './api-response.js';
 
 // ── Reusable field overrides ──
 
-const DateField = z.string().optional().describe('Calendar date in YYYY-MM-DD format; omit to use today.');
-const RequiredDateField = z.string().describe('Calendar date in YYYY-MM-DD format.');
+const RequiredDateField = z.string().date().describe('Real calendar date in YYYY-MM-DD format.');
+const DateField = RequiredDateField.optional().describe('Calendar date in YYYY-MM-DD format; omit to use today.');
 const MealField = z.enum(['breakfast', 'lunch', 'dinner', 'other']).describe('Diary meal bucket: breakfast, lunch, dinner, or other.');
+const RequestIdField = z.string().trim().min(1).max(128).optional().describe('Stable unique ID for this approved write. Reuse the same ID and arguments on retries, including later sessions.');
+const AllowDuplicateField = z.boolean().optional().describe('Set true only for an intentional extra copy of an identical portion already present in this meal and date.');
+const ExpectedNutritionSchema = z.object({
+  calories: z.number().finite().nonnegative(), protein: z.number().finite().nonnegative(),
+  carbohydrate: z.number().finite().nonnegative(), fat: z.number().finite().nonnegative(),
+}).optional().describe('Approved total nutrition for the requested quantity. The connector compares these values with subsequent diary reads.');
+
 
 // ── Public API – Foods ──
 
@@ -18,17 +26,18 @@ export const SearchFoodsInputSchema = pub.get__foods_search_v5.parameters.shape.
     flag_default_serving: z.boolean().optional().describe('Whether to mark the suggested or most common serving with is_default=1.'),
     include_food_attributes: z.boolean().optional().describe('Whether to include available allergen and dietary-preference data; requires the separate Premier attributes offering.'),
     include_food_images: z.boolean().optional().describe('Whether to include food image URLs; requires the separate Premier images offering.'),
-    max_results: z.number().optional().describe('Maximum results per page, from 1 to 50; defaults to 20.'),
+    max_results: z.number().int().min(1).max(50).optional().describe('Maximum results per page, from 1 to 50; defaults to 20.'),
     language: z.string().optional().describe('Language code such as "en" or "fr"; ignored unless region is also set.'),
     region: z.string().optional().describe('Country or region code such as "US" or "FR"; defaults to US.'),
-    page_number: z.number().optional().describe('Zero-based result page; use the page_number returned by a prior search to continue.'),
-    food_type: z.string().optional().describe('Food type filter: "generic", "brand", or "none" for no filter; defaults to "none".'),
+    page_number: z.number().int().nonnegative().optional().describe('Zero-based result page; use the page_number returned by a prior search to continue.'),
+    food_type: z.enum(['generic', 'brand', 'none']).optional().describe('Food type filter: "generic", "brand", or "none" for no filter; defaults to "none".'),
   });
 
 export const GetFoodInputSchema = pub.get__food_v5.parameters.shape.query
   .omit({ format: true })
   .extend({
-    food_id: z.number().int().describe('Food ID returned by search_foods, find_food_by_barcode, a food-list tool, or create_food.'),
+    source: z.enum(['auto', 'public', 'personal']).optional().describe('Use auto to try the public database, then user authorization for an unavailable personal food ID. Personal requires profile authorization.'),
+    food_id: z.number().int().positive().describe('Food ID returned by search_foods, find_food_by_barcode, a food-list tool, or create_food.'),
     include_sub_categories: z.boolean().optional().describe('Whether to include the food\'s subcategory names; Premier only.'),
     include_food_images: z.boolean().optional().describe('Whether to include food image URLs; requires the separate Premier images offering.'),
     include_food_attributes: z.boolean().optional().describe('Whether to include available allergen and dietary-preference data; requires the separate Premier attributes offering.'),
@@ -41,7 +50,7 @@ export const GetFoodInputSchema = pub.get__food_v5.parameters.shape.query
 export const FindFoodByBarcodeInputSchema = pub.get__food_barcode_findById_v2.parameters.shape.query
   .omit({ format: true })
   .extend({
-    barcode: z.string().describe('Exactly 13 GTIN-13 digits. Left-pad UPC-A or EAN-8 values with zeros; convert UPC-E to UPC-A first.'),
+    barcode: z.string().regex(/^\d{13}$/).describe('Exactly 13 GTIN-13 digits. Left-pad UPC-A or EAN-8 values with zeros; convert UPC-E to UPC-A first.'),
     region: z.string().optional().describe('Country or region code such as "US" or "FR"; defaults to US.'),
     language: z.string().optional().describe('Language code such as "en" or "fr"; ignored unless region is also set.'),
     include_sub_categories: z.boolean().optional().describe('Whether to include the matched food\'s subcategory names.'),
@@ -64,8 +73,8 @@ export const AutocompleteFoodsInputSchema = pub.get__food_autocomplete_v2.parame
 export const SearchRecipesInputSchema = pub.get__recipes_search_v3.parameters.shape.query
   .omit({ format: true })
   .extend({
-    page_number: z.number().optional().describe('Zero-based result page; use the page_number returned by a prior search to continue.'),
-    max_results: z.number().optional().describe('Maximum results per page, from 1 to 50; defaults to 20.'),
+    page_number: z.number().int().nonnegative().optional().describe('Zero-based result page; use the page_number returned by a prior search to continue.'),
+    max_results: z.number().int().min(1).max(50).optional().describe('Maximum results per page, from 1 to 50; defaults to 20.'),
     search_expression: z.string().optional().describe('Recipe name or ingredient phrase to search for; omit when filtering without text.'),
     recipe_types: z.string().optional().describe('Comma-separated recipe type names returned by get_recipe_types.'),
     recipe_types_matchall: z.boolean().optional().describe('For multiple recipe_types, require all types when true or any type when false; defaults to false.'),
@@ -86,7 +95,7 @@ export const SearchRecipesInputSchema = pub.get__recipes_search_v3.parameters.sh
 export const GetRecipeInputSchema = pub.get__recipe_v2.parameters.shape.query
   .omit({ format: true })
   .extend({
-    recipe_id: z.number().int().describe('Recipe ID returned by search_recipes or get_favorite_recipes.'),
+    recipe_id: z.number().int().positive().describe('Recipe ID returned by search_recipes or get_favorite_recipes.'),
     page_number: z.number().optional().describe('Compatibility pagination field; normally omit for a single-recipe lookup.'),
     max_results: z.number().optional().describe('Compatibility result-limit field; normally omit for a single-recipe lookup.'),
   });
@@ -103,7 +112,7 @@ export const GetFoodCategoriesInputSchema = pub.get__foodCategories_v2.parameter
 export const GetFoodSubCategoriesInputSchema = pub.get__foodSubCategories_v2.parameters.shape.query
   .omit({ format: true })
   .extend({
-    food_category_id: z.number().int().describe('Food category ID returned by get_food_categories.'),
+    food_category_id: z.number().int().positive().describe('Food category ID returned by get_food_categories.'),
     language: z.string().optional().describe('Language code such as "en" or "fr"; ignored unless region is also set.'),
     region: z.string().optional().describe('Country or region code such as "US" or "FR"; defaults to US.'),
   });
@@ -135,10 +144,13 @@ export const GetFoodEntriesMonthInputSchema = profile.get__foodEntries_month_v2.
 export const CreateFoodEntryInputSchema = profile.post__foodEntries_v1.parameters.shape.query
   .omit({ format: true, date: true, meal: true })
   .extend({
-    food_id: z.number().int().describe('Food ID returned by search_foods, find_food_by_barcode, get_food, or create_food.'),
+    expected_nutrition: ExpectedNutritionSchema,
+    request_id: RequestIdField,
+    allow_duplicate: AllowDuplicateField,
+    food_id: z.number().int().positive().describe('Food ID returned by search_foods, find_food_by_barcode, get_food, or create_food.'),
     food_entry_name: z.string().describe('User-visible diary label, usually the food_name returned by a food lookup.'),
-    serving_id: z.number().int().describe('Serving ID returned by get_food or a food-list tool; derived serving ID 0 cannot be logged.'),
-    number_of_units: z.number().describe('Quantity of the selected serving, such as 0.5, 1, or 2.'),
+    serving_id: z.number().int().positive().describe('Serving ID returned by get_food or a food-list tool; derived serving ID 0 cannot be logged.'),
+    number_of_units: z.number().finite().positive().describe('Quantity in measurement_description units. For a generic serving with number_of_units=100 and measurement_description=g, use 150 for 150 g. Brand servings normally use units=1.'),
     meal: MealField,
     date: DateField,
   });
@@ -146,20 +158,23 @@ export const CreateFoodEntryInputSchema = profile.post__foodEntries_v1.parameter
 export const EditFoodEntryInputSchema = profile.put__foodEntries_v1.parameters.shape.query
   .omit({ format: true, meal: true })
   .extend({
-    food_entry_id: z.number().int().describe('Food diary entry ID returned by get_food_entries.'),
+    expected_nutrition: ExpectedNutritionSchema,
+    food_entry_id: z.number().int().positive().describe('Food diary entry ID returned by get_food_entries.'),
     food_entry_name: z.string().optional().describe('Replacement user-visible label; omit to keep the current label.'),
-    serving_id: z.number().optional().describe('Replacement serving ID returned by get_food; omit to keep the current serving.'),
-    number_of_units: z.number().optional().describe('Replacement quantity of the selected serving; omit to keep the current quantity.'),
+    serving_id: z.number().int().positive().optional().describe('Replacement serving ID returned by get_food; omit to keep the current serving.'),
+    number_of_units: z.number().finite().positive().optional().describe('Replacement quantity of the selected serving; omit to keep the current quantity.'),
     meal: MealField.optional(),
   });
 
 export const DeleteFoodEntryInputSchema = profile.delete__foodEntries_v1.parameters.shape.query
   .omit({ format: true })
-  .extend({ food_entry_id: z.number().int().describe('Food diary entry ID returned by get_food_entries.') });
+  .extend({ food_entry_id: z.number().int().positive().describe('Food diary entry ID returned by get_food_entries.') });
 
 export const CopyFoodEntriesInputSchema = profile.post__foodEntries_copy_v1.parameters.shape.query
   .omit({ format: true, from_date: true, to_date: true, meal: true })
   .extend({
+    request_id: RequestIdField,
+    allow_duplicate: AllowDuplicateField,
     from_date: RequiredDateField.describe('Source calendar date in YYYY-MM-DD format.'),
     to_date: RequiredDateField.describe('Destination calendar date in YYYY-MM-DD format.'),
     meal: MealField.optional(),
@@ -168,7 +183,9 @@ export const CopyFoodEntriesInputSchema = profile.post__foodEntries_copy_v1.para
 export const CopySavedMealEntriesInputSchema = profile.post__foodEntries_copy_savedMeal_v1.parameters.shape.query
   .omit({ format: true, date: true, meal: true })
   .extend({
-    saved_meal_id: z.number().int().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.'),
+    request_id: RequestIdField,
+    allow_duplicate: AllowDuplicateField,
+    saved_meal_id: z.number().int().positive().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.'),
     meal: MealField,
     date: DateField,
   });
@@ -177,10 +194,10 @@ export const CopySavedMealEntriesInputSchema = profile.post__foodEntries_copy_sa
 
 export const GetFavoriteFoodsInputSchema = z.object({});
 
-export const DeleteFavoriteFoodInputSchema = profile.post__food_favorite_v1.parameters.shape.query
+export const DeleteFavoriteFoodInputSchema = profile.delete__food_favorite_v1.parameters.shape.query
   .omit({ format: true })
   .extend({
-    food_id: z.number().int().describe('Food ID returned by get_favorite_foods for the favorite to remove.'),
+    food_id: z.number().int().positive().describe('Food ID returned by get_favorite_foods for the favorite to remove.'),
     serving_id: z.string().optional().describe('Serving ID from get_favorite_foods when removing a serving-specific favorite; omit for the food-level favorite.'),
     number_of_units: z.string().optional().describe('Serving quantity from get_favorite_foods when removing a serving-specific favorite.'),
   });
@@ -197,11 +214,11 @@ export const GetFavoriteRecipesInputSchema = z.object({});
 
 export const AddFavoriteRecipeInputSchema = profile.post__recipe_favorites_v1.parameters.shape.query
   .omit({ format: true })
-  .extend({ recipe_id: z.number().int().describe('Recipe ID returned by search_recipes or get_recipe.') });
+  .extend({ recipe_id: z.number().int().positive().describe('Recipe ID returned by search_recipes or get_recipe.') });
 
 export const DeleteFavoriteRecipeInputSchema = profile.delete__recipe_favorites_v1.parameters.shape.query
   .omit({ format: true })
-  .extend({ recipe_id: z.number().int().describe('Recipe ID returned by get_favorite_recipes for the favorite to remove.') });
+  .extend({ recipe_id: z.number().int().positive().describe('Recipe ID returned by get_favorite_recipes for the favorite to remove.') });
 
 // ── Profile API – Saved Meals ──
 
@@ -220,7 +237,7 @@ export const CreateSavedMealInputSchema = profile.post__savedMeals_v1.parameters
 export const EditSavedMealInputSchema = profile.put__savedMeals_v1.parameters.shape.query
   .omit({ format: true })
   .extend({
-    saved_meal_id: z.number().int().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.'),
+    saved_meal_id: z.number().int().positive().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.'),
     saved_meal_name: z.string().optional().describe('Replacement saved-meal name; omit to keep the current name.'),
     saved_meal_description: z.string().optional().describe('Replacement saved-meal description; omit to keep the current description.'),
     meals: z.string().optional().describe('Replacement comma-separated suitable meal buckets: breakfast, lunch, dinner, and/or other.'),
@@ -228,48 +245,49 @@ export const EditSavedMealInputSchema = profile.put__savedMeals_v1.parameters.sh
 
 export const DeleteSavedMealInputSchema = profile.delete__savedMeals_v1.parameters.shape.query
   .omit({ format: true, method: true })
-  .extend({ saved_meal_id: z.number().int().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.') });
+  .extend({ saved_meal_id: z.number().int().positive().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.') });
 
 export const GetSavedMealItemsInputSchema = profile.get__savedMeals_item_v2.parameters.shape.query
   .omit({ format: true })
-  .extend({ saved_meal_id: z.number().int().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.') });
+  .extend({ saved_meal_id: z.number().int().positive().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.') });
 
 export const AddSavedMealItemInputSchema = profile.post__savedMeals_item_v1.parameters.shape.query
   .omit({ format: true })
   .extend({
-    saved_meal_id: z.number().int().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.'),
-    food_id: z.number().int().describe('Food ID returned by search_foods, find_food_by_barcode, get_food, or create_food.'),
+    saved_meal_id: z.number().int().positive().describe('Saved meal ID returned by get_saved_meals or create_saved_meal.'),
+    food_id: z.number().int().positive().describe('Food ID returned by search_foods, find_food_by_barcode, get_food, or create_food.'),
     saved_meal_item_name: z.string().describe('User-visible item label, usually the food_name returned by a food lookup.'),
-    serving_id: z.number().int().describe('Serving ID returned by get_food or a food-list tool.'),
-    number_of_units: z.number().describe('Quantity of the selected serving, such as 0.5, 1, or 2.'),
+    serving_id: z.number().int().positive().describe('Serving ID returned by get_food or a food-list tool.'),
+    number_of_units: z.number().finite().positive().describe('Quantity in measurement_description units. For a generic serving with number_of_units=100 and measurement_description=g, use 150 for 150 g. Brand servings normally use units=1.'),
   });
 
 export const EditSavedMealItemInputSchema = profile.put__savedMeals_item_v1.parameters.shape.query
   .omit({ format: true })
   .extend({
-    saved_meal_item_id: z.number().int().describe('Saved meal item ID returned by get_saved_meal_items or add_saved_meal_item.'),
+    saved_meal_item_id: z.number().int().positive().describe('Saved meal item ID returned by get_saved_meal_items or add_saved_meal_item.'),
     saved_meal_item_name: z.string().optional().describe('Replacement user-visible item label; omit to keep the current label.'),
-    number_of_units: z.number().optional().describe('Replacement quantity of the existing serving; omit to keep the current quantity.'),
+    number_of_units: z.number().finite().positive().optional().describe('Replacement quantity of the existing serving; omit to keep the current quantity.'),
   });
 
 export const DeleteSavedMealItemInputSchema = profile.delete__savedMeals_item_v1.parameters.shape.query
   .omit({ format: true, method: true })
-  .extend({ saved_meal_item_id: z.number().int().describe('Saved meal item ID returned by get_saved_meal_items or add_saved_meal_item.') });
+  .extend({ saved_meal_item_id: z.number().int().positive().describe('Saved meal item ID returned by get_saved_meal_items or add_saved_meal_item.') });
 
 // ── Profile API – Custom Food ──
 
 export const CreateFoodInputSchema = profile.post__food_v2.parameters.shape.query
   .omit({ format: true })
   .extend({
+    brand_type: z.enum(['manufacturer', 'restaurant', 'supermarket']).default('manufacturer').describe('Brand category for the custom food.'),
     brand_name: z.string().describe('Brand name for the custom food, such as "Acme".'),
     food_name: z.string().describe('Food name without the brand, such as "Whole Wheat Bread".'),
     serving_size: z.string().describe('Full serving description, such as "1 slice" or "100 g".'),
-    calories: z.number().describe('Calories in kcal for the stated serving.'),
-    fat: z.number().describe('Total fat in grams for the stated serving.'),
-    carbohydrate: z.number().describe('Total carbohydrate in grams for the stated serving.'),
-    protein: z.number().describe('Protein in grams for the stated serving.'),
+    calories: z.number().finite().nonnegative().describe('Calories in kcal for the stated serving.'),
+    fat: z.number().finite().nonnegative().describe('Total fat in grams for the stated serving.'),
+    carbohydrate: z.number().finite().nonnegative().describe('Total carbohydrate in grams for the stated serving.'),
+    protein: z.number().finite().nonnegative().describe('Protein in grams for the stated serving.'),
     serving_amount: z.string().optional().describe('Decimal standardized quantity encoded as a string; combine with serving_amount_unit.'),
-    serving_amount_unit: z.string().optional().describe('Standardized serving unit: "g", "ml", or "oz"; defaults to "g".'),
+    serving_amount_unit: z.enum(['g', 'ml', 'oz']).optional().describe('Standardized serving unit: "g", "ml", or "oz"; defaults to "g".'),
     calories_from_fat: z.string().optional().describe('Calories from fat in kcal, encoded as a decimal string.'),
     saturated_fat: z.string().optional().describe('Saturated fat in grams, encoded as a decimal string.'),
     polyunsaturated_fat: z.string().optional().describe('Polyunsaturated fat in grams, encoded as a decimal string.'),
@@ -356,7 +374,7 @@ export const CheckAuthStatusInputSchema = z.object({});
 // ── Tool outputs ──
 
 // FatSecret serializes numeric response values as strings in JSON responses.
-const ApiValueSchema = z.union([z.string(), z.number()]);
+const ApiValueSchema = z.union([z.string().refine(value => value.trim().length > 0 && Number.isFinite(Number(value))), z.number().finite()]);
 const ApiBooleanSchema = z.union([z.string(), z.number(), z.boolean()]);
 
 const FatSecretErrorSchema = z
@@ -372,7 +390,7 @@ const FatSecretErrorSchema = z
 
 function fatSecretOutput<T extends z.ZodTypeAny>(dataSchema: T): z.ZodTypeAny {
   return z.object({
-    data: z.union([dataSchema, FatSecretErrorSchema, z.null()]),
+    data: z.preprocess(normalizeResponse, z.union([dataSchema, FatSecretErrorSchema, z.null()])),
   });
 }
 
@@ -403,31 +421,31 @@ const ServingSchema = z
   .object({
     serving_id: ApiValueSchema,
     serving_description: z.string(),
-    serving_url: z.string().optional(),
-    metric_serving_amount: ApiValueSchema.optional(),
-    metric_serving_unit: z.string().optional(),
-    number_of_units: ApiValueSchema.optional(),
-    measurement_description: z.string().optional(),
+    serving_url: z.string().nullish(),
+    metric_serving_amount: ApiValueSchema.nullish(),
+    metric_serving_unit: z.string().nullish(),
+    number_of_units: ApiValueSchema.nullish(),
+    measurement_description: z.string().nullish(),
     calories: ApiValueSchema,
     carbohydrate: ApiValueSchema,
     protein: ApiValueSchema,
     fat: ApiValueSchema,
-    saturated_fat: ApiValueSchema.optional(),
-    polyunsaturated_fat: ApiValueSchema.optional(),
-    monounsaturated_fat: ApiValueSchema.optional(),
-    trans_fat: ApiValueSchema.optional(),
-    cholesterol: ApiValueSchema.optional(),
-    sodium: ApiValueSchema.optional(),
-    potassium: ApiValueSchema.optional(),
-    fiber: ApiValueSchema.optional(),
-    sugar: ApiValueSchema.optional(),
-    added_sugars: ApiValueSchema.optional(),
-    vitamin_a: ApiValueSchema.optional(),
-    vitamin_c: ApiValueSchema.optional(),
-    vitamin_d: ApiValueSchema.optional(),
-    calcium: ApiValueSchema.optional(),
-    iron: ApiValueSchema.optional(),
-    is_default: ApiBooleanSchema.optional(),
+    saturated_fat: ApiValueSchema.nullish(),
+    polyunsaturated_fat: ApiValueSchema.nullish(),
+    monounsaturated_fat: ApiValueSchema.nullish(),
+    trans_fat: ApiValueSchema.nullish(),
+    cholesterol: ApiValueSchema.nullish(),
+    sodium: ApiValueSchema.nullish(),
+    potassium: ApiValueSchema.nullish(),
+    fiber: ApiValueSchema.nullish(),
+    sugar: ApiValueSchema.nullish(),
+    added_sugars: ApiValueSchema.nullish(),
+    vitamin_a: ApiValueSchema.nullish(),
+    vitamin_c: ApiValueSchema.nullish(),
+    vitamin_d: ApiValueSchema.nullish(),
+    calcium: ApiValueSchema.nullish(),
+    iron: ApiValueSchema.nullish(),
+    is_default: ApiBooleanSchema.nullish(),
   })
   .passthrough();
 
@@ -436,46 +454,46 @@ const FoodSchema = z
     food_id: ApiValueSchema,
     food_name: z.string(),
     food_type: z.string(),
-    food_url: z.string(),
-    food_description: z.string().optional(),
-    brand_name: z.string().optional(),
+    food_url: z.string().nullish(),
+    food_description: z.string().nullish(),
+    brand_name: z.string().nullish(),
     food_sub_categories: z
       .object({
         food_sub_category: z.array(z.string()),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     food_images: z
       .object({
         food_image: z.array(ImageSchema),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     food_attributes: z
       .object({
         allergens: z
           .object({ allergen: z.array(AttributeSchema) })
           .passthrough()
-          .optional(),
+          .nullish(),
         preferences: z
           .object({ preference: z.array(AttributeSchema) })
           .passthrough()
-          .optional(),
+          .nullish(),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     servings: z
       .object({
         serving: z.array(ServingSchema),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
   })
   .passthrough();
 
 const FoodsDataSchema = z
   .object({
-    foods: z.object({ food: z.array(FoodSchema).optional() }).passthrough(),
+    foods: z.object({ food: z.array(FoodSchema).nullish() }).passthrough(),
   })
   .passthrough();
 
@@ -484,9 +502,9 @@ const FoodsSearchDataSchema = z
     foods_search: z
       .object({
         max_results: ApiValueSchema,
-        total_results: ApiValueSchema,
+        total_results: ApiValueSchema.nullish(),
         page_number: ApiValueSchema,
-        results: z.object({ food: z.array(FoodSchema).optional() }).passthrough(),
+        results: z.object({ food: z.array(FoodSchema).nullish() }).passthrough(),
       })
       .passthrough(),
   })
@@ -498,18 +516,18 @@ const RecipeSchema = z
   .object({
     recipe_id: ApiValueSchema,
     recipe_name: z.string(),
-    recipe_url: z.string().optional(),
-    recipe_description: z.string().optional(),
-    recipe_image: z.string().optional(),
-    number_of_servings: ApiValueSchema.optional(),
-    grams_per_portion: ApiValueSchema.optional(),
-    preparation_time_min: ApiValueSchema.optional(),
-    cooking_time_min: ApiValueSchema.optional(),
-    rating: ApiValueSchema.optional(),
+    recipe_url: z.string().nullish(),
+    recipe_description: z.string().nullish(),
+    recipe_image: z.string().nullish(),
+    number_of_servings: ApiValueSchema.nullish(),
+    grams_per_portion: ApiValueSchema.nullish(),
+    preparation_time_min: ApiValueSchema.nullish(),
+    cooking_time_min: ApiValueSchema.nullish(),
+    rating: ApiValueSchema.nullish(),
     recipe_types: z
       .object({ recipe_type: z.array(z.string()) })
       .passthrough()
-      .optional(),
+      .nullish(),
     recipe_categories: z
       .object({
         recipe_category: z.array(
@@ -522,11 +540,11 @@ const RecipeSchema = z
         ),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     recipe_images: z
       .object({ recipe_image: z.array(z.string()) })
       .passthrough()
-      .optional(),
+      .nullish(),
     ingredients: z
       .object({
         ingredient: z.array(
@@ -544,7 +562,7 @@ const RecipeSchema = z
         ),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     directions: z
       .object({
         direction: z.array(
@@ -557,7 +575,7 @@ const RecipeSchema = z
         ),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     recipe_nutrition: z
       .object({
         calories: ApiValueSchema,
@@ -566,11 +584,11 @@ const RecipeSchema = z
         fat: ApiValueSchema,
       })
       .passthrough()
-      .optional(),
+      .nullish(),
     recipe_ingredients: z
       .object({ ingredient: z.array(z.string()) })
       .passthrough()
-      .optional(),
+      .nullish(),
     serving_sizes: z
       .object({
         serving: z.union([
@@ -597,7 +615,7 @@ const RecipeSchema = z
         ]),
       })
       .passthrough()
-      .optional(),
+      .nullish(),
   })
   .passthrough();
 
@@ -607,10 +625,10 @@ const RecipesDataSchema = z
   .object({
     recipes: z
       .object({
-        max_results: ApiValueSchema.optional(),
-        total_results: ApiValueSchema.optional(),
-        page_number: ApiValueSchema.optional(),
-        recipe: z.array(RecipeSchema).optional(),
+        max_results: ApiValueSchema.nullish(),
+        total_results: ApiValueSchema.nullish(),
+        page_number: ApiValueSchema.nullish(),
+        recipe: z.array(RecipeSchema).nullish(),
       })
       .passthrough(),
   })
@@ -630,27 +648,27 @@ const FoodEntrySchema = z
     carbohydrate: ApiValueSchema,
     protein: ApiValueSchema,
     fat: ApiValueSchema,
-    saturated_fat: ApiValueSchema.optional(),
-    polyunsaturated_fat: ApiValueSchema.optional(),
-    monounsaturated_fat: ApiValueSchema.optional(),
-    trans_fat: ApiValueSchema.optional(),
-    cholesterol: ApiValueSchema.optional(),
-    sodium: ApiValueSchema.optional(),
-    potassium: ApiValueSchema.optional(),
-    fiber: ApiValueSchema.optional(),
-    sugar: ApiValueSchema.optional(),
-    added_sugars: ApiValueSchema.optional(),
-    vitamin_a: ApiValueSchema.optional(),
-    vitamin_c: ApiValueSchema.optional(),
-    vitamin_d: ApiValueSchema.optional(),
-    calcium: ApiValueSchema.optional(),
-    iron: ApiValueSchema.optional(),
+    saturated_fat: ApiValueSchema.nullish(),
+    polyunsaturated_fat: ApiValueSchema.nullish(),
+    monounsaturated_fat: ApiValueSchema.nullish(),
+    trans_fat: ApiValueSchema.nullish(),
+    cholesterol: ApiValueSchema.nullish(),
+    sodium: ApiValueSchema.nullish(),
+    potassium: ApiValueSchema.nullish(),
+    fiber: ApiValueSchema.nullish(),
+    sugar: ApiValueSchema.nullish(),
+    added_sugars: ApiValueSchema.nullish(),
+    vitamin_a: ApiValueSchema.nullish(),
+    vitamin_c: ApiValueSchema.nullish(),
+    vitamin_d: ApiValueSchema.nullish(),
+    calcium: ApiValueSchema.nullish(),
+    iron: ApiValueSchema.nullish(),
   })
   .passthrough();
 
 const FoodEntriesDataSchema = z
   .object({
-    food_entries: z.object({ food_entry: z.array(FoodEntrySchema).optional() }).passthrough(),
+    food_entries: z.object({ food_entry: z.array(FoodEntrySchema).nullish() }).passthrough(),
   })
   .passthrough();
 
@@ -668,13 +686,13 @@ const MonthSchema = z
   .object({
     from_date_int: ApiValueSchema,
     to_date_int: ApiValueSchema,
-    day: z.array(z.object({ date_int: ApiValueSchema }).passthrough()).optional(),
+    day: z.array(z.object({ date_int: ApiValueSchema }).passthrough()).nullish(),
   })
   .passthrough();
 
 const FoodEntriesMonthDataSchema = z
   .object({
-    month: MonthSchema.extend({ day: z.array(NutritionDaySchema).optional() }),
+    month: MonthSchema.extend({ day: z.array(NutritionDaySchema).nullish() }),
   })
   .passthrough();
 
@@ -682,14 +700,14 @@ const SavedMealSchema = z
   .object({
     saved_meal_id: ApiValueSchema,
     saved_meal_name: z.string(),
-    saved_meal_description: z.string().optional(),
-    meals: z.string().optional(),
+    saved_meal_description: z.string().nullish(),
+    meals: z.string().nullish(),
   })
   .passthrough();
 
 const SavedMealsDataSchema = z
   .object({
-    saved_meals: z.object({ saved_meal: z.array(SavedMealSchema).optional() }).passthrough(),
+    saved_meals: z.object({ saved_meal: z.array(SavedMealSchema).nullish() }).passthrough(),
   })
   .passthrough();
 
@@ -706,7 +724,7 @@ const SavedMealItemSchema = z
 const SavedMealItemsDataSchema = z
   .object({
     saved_meal_items: z
-      .object({ saved_meal_item: z.array(SavedMealItemSchema).optional() })
+      .object({ saved_meal_item: z.array(SavedMealItemSchema).nullish() })
       .passthrough(),
   })
   .passthrough();
@@ -721,11 +739,11 @@ const ExercisesDataSchema = z
               .object({
                 exercise_id: ApiValueSchema,
                 exercise_name: z.string(),
-                exercise_description: z.string().optional(),
+                exercise_description: z.string().nullish(),
               })
               .passthrough(),
           )
-          .optional(),
+          .nullish(),
       })
       .passthrough(),
   })
@@ -737,11 +755,11 @@ const ProfileDataSchema = z
       .object({
         weight_measure: z.string(),
         height_measure: z.string(),
-        last_weight_kg: ApiValueSchema.optional(),
-        last_weight_date_int: ApiValueSchema.optional(),
-        last_weight_comment: z.string().optional(),
-        goal_weight_kg: ApiValueSchema.optional(),
-        height_cm: ApiValueSchema.optional(),
+        last_weight_kg: ApiValueSchema.nullish(),
+        last_weight_date_int: ApiValueSchema.nullish(),
+        last_weight_comment: z.string().nullish(),
+        goal_weight_kg: ApiValueSchema.nullish(),
+        height_cm: ApiValueSchema.nullish(),
       })
       .passthrough(),
   })
@@ -755,13 +773,13 @@ const idDataSchema = (name: string) =>
     .passthrough();
 
 // Public API – Foods
-export const SearchFoodsOutputSchema = fatSecretOutput(FoodsSearchDataSchema);
+export const SearchFoodsOutputSchema = fatSecretOutput(z.union([FoodsSearchDataSchema, FoodsDataSchema]));
 export const GetFoodOutputSchema = fatSecretOutput(FoodDataSchema);
 export const FindFoodByBarcodeOutputSchema = fatSecretOutput(FoodDataSchema);
 export const AutocompleteFoodsOutputSchema = fatSecretOutput(
   z
     .object({
-      suggestions: z.object({ suggestion: z.array(z.string()).optional() }).passthrough(),
+      suggestions: z.object({ suggestion: z.array(z.string()).nullish() }).passthrough(),
     })
     .passthrough(),
 );
@@ -782,11 +800,11 @@ export const GetFoodCategoriesOutputSchema = fatSecretOutput(
                 .object({
                   food_category_id: ApiValueSchema,
                   food_category_name: z.string(),
-                  food_category_description: z.string().optional(),
+                  food_category_description: z.string().nullish(),
                 })
                 .passthrough(),
             )
-            .optional(),
+            .nullish(),
         })
         .passthrough(),
     })
@@ -796,7 +814,7 @@ export const GetFoodSubCategoriesOutputSchema = fatSecretOutput(
   z
     .object({
       food_sub_categories: z
-        .object({ food_sub_category: z.array(z.string()).optional() })
+        .object({ food_sub_category: z.array(z.string()).nullish() })
         .passthrough(),
     })
     .passthrough(),
@@ -804,14 +822,14 @@ export const GetFoodSubCategoriesOutputSchema = fatSecretOutput(
 export const GetBrandsOutputSchema = fatSecretOutput(
   z
     .object({
-      food_brands: z.object({ food_brand: z.array(z.string()).optional() }).passthrough(),
+      food_brands: z.object({ food_brand: z.array(z.string()).nullish() }).passthrough(),
     })
     .passthrough(),
 );
 export const GetRecipeTypesOutputSchema = fatSecretOutput(
   z
     .object({
-      recipe_types: z.object({ recipe_types: z.array(z.string()).optional() }).passthrough(),
+      recipe_types: z.object({ recipe_types: z.array(z.string()).nullish() }).passthrough(),
     })
     .passthrough(),
 );
@@ -856,11 +874,11 @@ export const GetWeightMonthOutputSchema = fatSecretOutput(
               .object({
                 date_int: ApiValueSchema,
                 weight_kg: ApiValueSchema,
-                weight_comment: z.string().optional(),
+                weight_comment: z.string().nullish(),
               })
               .passthrough(),
           )
-          .optional(),
+          .nullish(),
       }),
     })
     .passthrough(),
@@ -875,7 +893,7 @@ export const GetExerciseEntriesMonthOutputSchema = fatSecretOutput(
       month: MonthSchema.extend({
         day: z
           .array(z.object({ date_int: ApiValueSchema, calories: ApiValueSchema }).passthrough())
-          .optional(),
+          .nullish(),
       }),
     })
     .passthrough(),
@@ -891,6 +909,10 @@ export const CheckAuthStatusOutputSchema = z.object({
   data: z.object({
     credentials_configured: z.boolean(),
     profile_authenticated: z.boolean(),
+    public_credentials_configured: z.boolean().optional(),
+    requested_scopes: z.array(z.string()).optional(),
+    granted_scopes: z.array(z.string()).nullable().optional(),
+    entitlements_verified: z.literal(false).optional(),
     config_path: z.string(),
     message: z.string(),
   }),

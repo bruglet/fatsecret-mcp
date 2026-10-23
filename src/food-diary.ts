@@ -2,6 +2,9 @@
  * Converts a YYYY-MM-DD date string to "days since January 1, 1970".
  */
 export function dateToDays(dateStr: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !Number.isFinite(Date.parse(dateStr + 'T00:00:00Z')) || new Date(dateStr + 'T00:00:00Z').toISOString().slice(0, 10) !== dateStr) {
+    throw new Error('Invalid calendar date. Use a real date in YYYY-MM-DD format.');
+  }
   return Math.floor(new Date(dateStr + 'T00:00:00Z').getTime() / (1000 * 60 * 60 * 24));
 }
 

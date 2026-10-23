@@ -29,6 +29,8 @@ jobs:
         run: npm run lint
       - name: Run type check
         run: npm run type-check
+      - name: Run isolated regression tests
+        run: env -u MCP_SERVER_URL -u USE_REAL_SERVER -u FATSECRET_CLIENT_ID -u FATSECRET_CLIENT_SECRET -u FATSECRET_CONSUMER_SECRET npm test
       - name: Build package
         run: npm run build
 

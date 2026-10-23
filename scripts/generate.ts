@@ -65,6 +65,15 @@ for (const file of ['src/generated/public-api.zod.ts', 'src/generated/profile-ap
 }
 console.log('✅ Zod schemas generated');
 
+// Preserve barcode digits in transport, including leading zeros in GTIN-13.
+for (const file of ['src/generated/public-api.d.ts', 'src/generated/public-api.zod.ts']) {
+  const path = join(ROOT, file);
+  const content = readFileSync(path, 'utf-8')
+    .replace(/barcode\?: number;/g, 'barcode?: string;')
+    .replace(/barcode: z\.number\(\)\.optional\(\)/g, 'barcode: z.string().optional()');
+  writeFileSync(path, content);
+}
+
 // Step 6: Add generation banner with source and date
 console.log('\n📝 Step 6: Adding generation banner...');
 const generatedAt = new Date().toISOString().split('T')[0];

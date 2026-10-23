@@ -34,7 +34,7 @@ export function loadConfigFile(configPath: string = getConfigPath()): Config {
   try {
     raw = readFileSync(configPath, 'utf-8');
   } catch (err: unknown) {
-    const nodeErr = err as NodeJS.ErrnoException;
+    const nodeErr = err as Error & { code?: string };
     if (nodeErr.code === 'ENOENT') {
       console.error(`No config file at ${configPath}`);
     } else {
@@ -86,7 +86,7 @@ export function saveConfigFile(updates: Partial<Config>, configPath: string = ge
   try {
     writeFileSync(tmpPath, payload, 'utf-8');
     renameSync(tmpPath, configPath);
-  } catch (writeErr) {
+  } catch {
     // Fallback if atomic rename is not supported
     try {
       writeFileSync(configPath, payload, 'utf-8');
@@ -95,7 +95,7 @@ export function saveConfigFile(updates: Partial<Config>, configPath: string = ge
       }
     } catch (directErr) {
       if (existsSync(tmpPath)) {
-        try { unlinkSync(tmpPath); } catch {}
+        try { unlinkSync(tmpPath); } catch { /* Best-effort cleanup. */ }
       }
       console.error(`Failed to write config file to ${configPath}:`, directErr);
       throw new Error(`Failed to write config file to ${configPath}: ${(directErr as Error).message}`);

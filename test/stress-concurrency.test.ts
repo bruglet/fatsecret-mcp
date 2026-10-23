@@ -19,10 +19,15 @@ async function startRealServer(): Promise<ServerHarness> {
   const configDir = mkdtempSync(join(tmpdir(), 'fatsecret-stress-'));
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const proc = spawn('/var/home/brug/.local/bin/node', ['--import', 'tsx', 'src/index.ts'], {
+  const proc = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
     env: {
       ...process.env,
       PORT: String(port),
+      HOST: '127.0.0.1',
+      SKIP_AUTH: 'true',
+      FATSECRET_CLIENT_ID: '',
+      FATSECRET_CLIENT_SECRET: '',
+      FATSECRET_CONSUMER_SECRET: '',
       FATSECRET_CONFIG_DIR: configDir,
     },
     stdio: 'pipe',
@@ -401,7 +406,7 @@ test('Stress Challenge 4: Boundary & Prototype Safety on Session IDs', async (t)
     }
   });
 
-  await t.test('Audit prototype property lookup vulnerability (toString, constructor, __proto__)', async () => {
+  await t.test('Prototype property names cannot resolve to sessions', async () => {
     const prototypeKeys = ['toString', 'valueOf', 'constructor', 'hasOwnProperty', '__proto__'];
 
     for (const key of prototypeKeys) {
@@ -414,11 +419,8 @@ test('Stress Challenge 4: Boundary & Prototype Safety on Session IDs', async (t)
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
       });
 
-      // Record whether the server returns 404 or fails with 500
-      console.log(`[Security Audit] Key: ${key} -> Status: ${res.status}`);
-      if (res.status === 500) {
-        console.warn(`[VULNERABILITY CONFIRMED] Session ID "${key}" triggers HTTP 500 and leaks stack trace!`);
-      }
+      assert.equal(res.status, 404, key);
+      assert.equal((await res.json()).error.code, -32001);
     }
   });
 });

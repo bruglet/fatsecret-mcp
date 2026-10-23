@@ -43,9 +43,9 @@ export const post__food_v2 = {
   }),
 };
 
-export type post__food_favorite_v1 = typeof post__food_favorite_v1;
-export const post__food_favorite_v1 = {
-  method: z.literal("POST"),
+export type delete__food_favorite_v1 = typeof delete__food_favorite_v1;
+export const delete__food_favorite_v1 = {
+  method: z.literal("DELETE"),
   path: z.literal("/food/favorite/v1"),
   requestFormat: z.literal("text"),
   parameters: z.object({

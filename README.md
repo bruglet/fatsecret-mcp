@@ -38,7 +38,7 @@ Add to your MCP client configuration:
 That's it! On first use, the AI will guide you through setup:
 
 1. **`check_auth_status`** — detects missing credentials and tells you what to do
-2. **`setup_credentials`** — you provide your API keys (saved to `~/.fatsecret-mcp/config.json`)
+2. **`setup_credentials`** — you provide your API keys (saved to `/data/config.json` by default, or the directory in `FATSECRET_CONFIG_DIR`)
 3. **`start_auth`** → **`complete_auth`** — authorize your FatSecret account for diary/weight tools
 
 Alternatively, you can pass credentials as environment variables:
@@ -174,6 +174,57 @@ Verify with `claude mcp list`.
 
 <sub>API reference: [FatSecret Postman Collection](https://www.postman.com/fatsecret/fatsecret-public-apis/)</sub>
 
+## Connector behavior on the v2 branch
+
+Basic access uses `foods.search` v1. Search results include summary nutrition and the original pagination.
+`get_food` supplies serving identifiers, measurement units, and detailed nutrition.
+The connector does not invent serving identifiers or missing nutrient values.
+
+`get_food` accepts `source: "auto"`, `"public"`, or `"personal"`.
+The default tries user authorization after a public invalid-ID response.
+This path requires profile authorization. Retrieval of existing private foods still requires live verification.
+
+`check_auth_status` reports stored credentials and requested scopes separately from account entitlements.
+`FATSECRET_OAUTH_SCOPES` defaults to `basic`.
+After account approval, this variable can specify authorized scopes such as `basic premier barcode`.
+The connector attempts Premier search only with a requested Premier scope.
+A missing-scope response permits Basic fallback only when Basic search can honor the request.
+Autocomplete, barcode scanning, categorization, and custom-food creation still require their applicable entitlements.
+
+Diary create and copy tools accept an optional `request_id`.
+For each approved write, use a unique ID and an explicit date.
+For retries, reuse the same ID, date, and arguments.
+The connector stores hashed intent and entry identifiers under `FATSECRET_CONFIG_DIR/diary-requests`.
+It does not store nutrition or profile tokens in this journal.
+The journal survives process restarts and separates profile authorizations.
+Reauthorization with a different profile token creates a separate journal namespace.
+
+The connector reads diary entries after writes.
+Create and edit tools accept `expected_nutrition` with total calories, protein, carbohydrate, and fat for the requested quantity.
+A nutrition mismatch returns the recorded entry and a warning.
+Quantity uses the serving measurement units, which can differ from the full serving description.
+For example, a generic 100 g serving can require `number_of_units: 150` for 150 g.
+Derived serving ID `0` is invalid for diary writes.
+
+Identical portions in the same meal and date return `already_exists` by default.
+For an intentional extra portion, set `allow_duplicate: true`.
+Partial overlaps block full-meal copies before a write.
+Local diary operations run sequentially. Separate server processes require shared persistent storage and a stable `request_id` for retry protection.
+If a request has an unknown outcome, inspect the diary before authorizing another write.
+The connector never deletes unrelated entries to resolve overlaps.
+
+Private custom-food creation and the food-recognition plugin skill remain separate work.
+No live diary writes formed part of the v2 regression tests.
+
+The isolated regression command is:
+
+```bash
+env -u MCP_SERVER_URL -u USE_REAL_SERVER \
+  -u FATSECRET_CLIENT_ID -u FATSECRET_CLIENT_SECRET \
+  -u FATSECRET_CONSUMER_SECRET -u CF_ACCESS_TEAM_DOMAIN \
+  -u CF_ACCESS_AUD npm test
+```
+
 ## 🧪 Test Connection
 
 ```bash
@@ -203,6 +254,8 @@ Debugging with MCP Inspector:
 
 ```bash
 FATSECRET_CLIENT_ID=X FATSECRET_CLIENT_SECRET=X FATSECRET_CONSUMER_SECRET=X npx -y @modelcontextprotocol/inspector npx <local-path>/fatsecret-mcp
+```
+
 ## 🐳 Deployment with Podman Quadlet & Cloudflare Tunnel
 
 Deploy the MCP server as a rootless container managed by systemd and exposed securely through a Cloudflare Tunnel with Cloudflare Access Managed OAuth.

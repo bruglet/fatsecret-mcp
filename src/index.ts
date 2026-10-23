@@ -4,31 +4,25 @@ import express, { type Request as ExpressRequest, type Response as ExpressRespon
 import type { Server as HttpServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 import createClient, { type Middleware } from 'openapi-fetch';
 import type { paths as PublicPaths } from './generated/public-api.js';
 import type { paths as ProfilePaths } from './generated/profile-api.js';
-import { buildGetFoodEntriesQuery } from './food-diary.js';
+import { buildGetFoodEntriesQuery, dateToDays, optionalDateToDays } from './food-diary.js';
 import { buildOAuth1Params, requestToken, accessToken, type OAuth1Credentials } from './oauth1.js';
 import * as schemas from './schemas.js';
 import { type Config, getConfigDir, getConfigPath, loadConfigFile, saveConfigFile } from './config.js';
 import { createMcpTransport } from './transport/streamable.js';
 import { cloudflareAccessAuth } from './auth-middleware.js';
-import { text } from './tool-output.js';
+import { text, apiText } from './tool-output.js';
+import { apiFetch, FatSecretApiError, normalizeResponse } from './api-response.js';
+import { DiaryOperations, type DiaryEntry } from './diary-operations.js';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
 
 const BASE_URL = 'https://platform.fatsecret.com/rest';
-
-// ── Helpers ──
-
-function dateToDays(dateStr: string): number {
-  return Math.floor(new Date(dateStr + 'T00:00:00Z').getTime() / (1000 * 60 * 60 * 24));
-}
-
-function optionalDateToDays(dateStr?: string): number | undefined {
-  return dateStr ? dateToDays(dateStr) : undefined;
-}
 
 // ── Server ──
 
@@ -38,21 +32,39 @@ class FatSecretMcpServer {
 
   private oauth2Token: string | null = null;
   private oauth2TokenExpiry = 0;
+  private oauth2TokenRequest: Promise<string> | null = null;
+  private grantedScopes: string[] | null = null;
+  private readonly requestedScopes = (process.env.FATSECRET_OAUTH_SCOPES?.trim() || 'basic').split(/\s+/);
+  private readonly fetcher: typeof globalThis.fetch;
+  private readonly rawFetcher: typeof globalThis.fetch;
 
   private publicClient: ReturnType<typeof createClient<PublicPaths>>;
   private profileClient: ReturnType<typeof createClient<ProfilePaths>>;
+  private profileFoodClient: ReturnType<typeof createClient<PublicPaths>>;
 
   private oauth1Credentials: OAuth1Credentials;
+  private diary: DiaryOperations;
   private pendingOAuth: { token: string; secret: string } | null = null;
 
-  constructor() {
+  constructor(options: { fetch?: typeof globalThis.fetch } = {}) {
+    this.rawFetcher = options.fetch ?? globalThis.fetch;
+    this.fetcher = apiFetch(this.rawFetcher);
     this.oauth1Credentials = { consumerKey: '', consumerSecret: '' };
 
     // Load config: persistent file first, env vars override
     this.loadConfig();
 
     // Public API client with OAuth 2.0
-    this.publicClient = createClient<PublicPaths>({ baseUrl: BASE_URL });
+    this.publicClient = createClient<PublicPaths>({ baseUrl: BASE_URL, fetch: async (input: Request) => {
+      try { return await this.fetcher(input); } catch (error) {
+        if (!(error instanceof FatSecretApiError) || String(error.code) !== '13' || !(input instanceof Request) || input.method !== 'GET') throw error;
+        this.oauth2Token = null;
+        this.oauth2TokenExpiry = 0;
+        const retry = new Request(input);
+        retry.headers.set('Authorization', `Bearer ${await this.getOAuth2Token()}`);
+        return this.fetcher(retry);
+      }
+    } });
     const oauth2Middleware: Middleware = {
       onRequest: async ({ request }) => {
         const token = await this.getOAuth2Token();
@@ -63,7 +75,7 @@ class FatSecretMcpServer {
     this.publicClient.use(oauth2Middleware);
 
     // Profile API client with OAuth 1.0 (params in query string, not Authorization header)
-    this.profileClient = createClient<ProfilePaths>({ baseUrl: BASE_URL });
+    this.profileClient = createClient<ProfilePaths>({ baseUrl: BASE_URL, fetch: this.fetcher });
     const oauth1Middleware: Middleware = {
       onRequest: async ({ request }) => {
         this.ensureProfileAuth();
@@ -76,6 +88,53 @@ class FatSecretMcpServer {
       },
     };
     this.profileClient.use(oauth1Middleware);
+    this.profileFoodClient = createClient<PublicPaths>({ baseUrl: BASE_URL, fetch: this.fetcher });
+    this.profileFoodClient.use(oauth1Middleware);
+    this.diary = new DiaryOperations({
+      account: () => {
+        this.ensureProfileAuth();
+        return JSON.stringify([this.oauth1Credentials.consumerKey, this.oauth1Credentials.accessToken]);
+      },
+      read: async (date, food_entry_id) => {
+        const { data } = await this.profileClient.GET('/food-entries/v2', {
+          params: { query: buildGetFoodEntriesQuery({ date, food_entry_id }) },
+        });
+        apiText(data, schemas.GetFoodEntriesOutputSchema);
+        return (normalizeResponse(data) as { food_entries: { food_entry: DiaryEntry[] } }).food_entries.food_entry;
+      },
+      create: async ({ date, ...args }) => {
+        const { data } = await this.profileClient.POST('/food-entries/v1', {
+          params: { query: { ...args, date: optionalDateToDays(date), format: 'json' } },
+        });
+        apiText(data, schemas.CreateFoodEntryOutputSchema);
+        return (normalizeResponse(data) as { food_entries: { food_entry: DiaryEntry[] } }).food_entries.food_entry;
+      },
+      edit: async args => {
+        const { data } = await this.profileClient.PUT('/food-entries/v1', { params: { query: { ...args, format: 'json' } } });
+        apiText(data, schemas.EditFoodEntryOutputSchema);
+      },
+      delete: async food_entry_id => {
+        const { data } = await this.profileClient.DELETE('/food-entries/v1', { params: { query: { food_entry_id, format: 'json' } } });
+        apiText(data, schemas.DeleteFoodEntryOutputSchema);
+      },
+      copy: async ({ from_date, to_date, ...args }) => {
+        const { data } = await this.profileClient.POST('/food-entries/copy/v1', {
+          params: { query: { ...args, from_date: dateToDays(from_date), to_date: dateToDays(to_date), format: 'json' } },
+        });
+        apiText(data, schemas.CopyFoodEntriesOutputSchema);
+      },
+      copySaved: async ({ date, ...args }) => {
+        const { data } = await this.profileClient.POST('/food-entries/copy/saved-meal/v1', {
+          params: { query: { ...args, date: optionalDateToDays(date), format: 'json' } },
+        });
+        apiText(data, schemas.CopySavedMealEntriesOutputSchema);
+      },
+      readSaved: async saved_meal_id => {
+        const { data } = await this.profileClient.GET('/saved-meals/item/v2', { params: { query: { saved_meal_id, format: 'json' } } });
+        apiText(data, schemas.GetSavedMealItemsOutputSchema);
+        return (normalizeResponse(data) as { saved_meal_items: { saved_meal_item: DiaryEntry[] } }).saved_meal_items.saved_meal_item;
+      },
+    }, this.getConfigDir());
   }
 
   public createMcpServer(): McpServer {
@@ -89,7 +148,7 @@ class FatSecretMcpServer {
           '   It will tell you if credentials are missing and guide through setup_credentials.',
           '   Get credentials at https://platform.fatsecret.com/ → My Account → API Keys.',
           '',
-          '2. PUBLIC API (works after setup): Food search, recipes, brands, categories.',
+          '2. PUBLIC API: Basic food search and details work with Basic access. Other features can require additional scopes and entitlements.',
           '   These tools use OAuth 2.0 with the configured Client ID and Client Secret.',
           '',
           '3. PROFILE API (requires user authorization): Food diary, saved meals, favorites, weight, exercises, profile.',
@@ -159,7 +218,7 @@ class FatSecretMcpServer {
   }
 
   private hasApiCredentials(): boolean {
-    return !!(this.clientId && this.clientSecret && this.oauth1Credentials.consumerSecret);
+    return !!(this.clientId && this.clientSecret);
   }
 
   private ensureApiCredentials(): void {
@@ -180,30 +239,39 @@ class FatSecretMcpServer {
       return this.oauth2Token;
     }
 
-    const response = await fetch('https://oauth.fatsecret.com/connect/token', {
+    if (!this.oauth2TokenRequest) {
+      this.oauth2TokenRequest = this.requestOAuth2Token().finally(() => { this.oauth2TokenRequest = null; });
+    }
+    return this.oauth2TokenRequest;
+  }
+
+  private async requestOAuth2Token(): Promise<string> {
+    const response = await this.fetcher('https://oauth.fatsecret.com/connect/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        scope: 'basic',
+        grant_type: 'client_credentials', client_id: this.clientId, client_secret: this.clientSecret,
+        scope: this.requestedScopes.join(' '),
       }),
     });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`OAuth2 token request failed: ${response.status} ${body}`);
+    const data = await response.json() as { access_token?: string; expires_in?: number; scope?: string };
+    if (!data.access_token || !Number.isFinite(Number(data.expires_in)) || Number(data.expires_in) <= 0) {
+      throw new FatSecretApiError('INVALID_TOKEN_RESPONSE', 'The token service omitted the access token or expiry. Check the API credentials.');
     }
-
-    const data = (await response.json()) as { access_token: string; expires_in: number };
     this.oauth2Token = data.access_token;
-    this.oauth2TokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+    this.oauth2TokenExpiry = Date.now() + Math.max(0, Number(data.expires_in) - 60) * 1000;
+    this.grantedScopes = typeof data.scope === 'string' ? data.scope.split(/\s+/) : null;
     return this.oauth2Token;
   }
 
+  private ensureOAuth1Credentials(): void {
+    if (!this.oauth1Credentials.consumerKey || !this.oauth1Credentials.consumerSecret) {
+      throw new FatSecretApiError('PROFILE_CREDENTIALS_MISSING', 'Profile operations require the OAuth 1.0 consumer key and consumer secret.');
+    }
+  }
+
   private ensureProfileAuth(): void {
-    this.ensureApiCredentials();
+    this.ensureOAuth1Credentials();
     if (!this.oauth1Credentials.accessToken || !this.oauth1Credentials.accessTokenSecret) {
       throw new Error(
         'Not authenticated for profile access. Use check_auth_status to check, then start_auth and complete_auth to authorize.',
@@ -217,16 +285,43 @@ class FatSecretMcpServer {
     server.registerTool(
       'search_foods',
       {
-        description: 'Returns paginated food matches with IDs, serving options, nutrition, and any requested images, subcategories, or dietary attributes. Use when the user wants to find foods by name or needs a food_id before get_food, create_food_entry, or add_saved_meal_item; use autocomplete_foods only for lightweight query suggestions. Premier only.',
+        description: 'Returns paginated food matches with IDs, serving options, nutrition, and any requested images, subcategories, or dietary attributes. Use when the user wants to find foods by name or needs a food_id before get_food, create_food_entry, or add_saved_meal_item; use autocomplete_foods only for lightweight query suggestions. Basic access returns summary nutrition; use get_food for serving IDs. Premier results include serving nutrition when authorized.',
         inputSchema: schemas.SearchFoodsInputSchema,
         outputSchema: schemas.SearchFoodsOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
       async (args) => {
-        const { data } = await this.publicClient.GET('/foods/search/v5', {
-          params: { query: { ...args, format: 'json' } },
+        if (this.requestedScopes.includes('premier')) {
+          try {
+            const { data } = await this.publicClient.GET('/foods/search/v5', {
+              params: { query: { ...args, format: 'json' } },
+            });
+            return apiText({ ...data as object, search_mode: 'premier' }, schemas.SearchFoodsOutputSchema);
+          } catch (error) {
+            if (!(error instanceof FatSecretApiError) || String(error.code) !== '14') throw error;
+          }
+        }
+        const unsupported = args.include_sub_categories || args.include_food_images || args.include_food_attributes || args.flag_default_serving
+          || (args.food_type && args.food_type !== 'none') || (args.region && args.region.toUpperCase() !== 'US')
+          || (args.language && args.language.toLowerCase() !== 'en');
+        if (unsupported) {
+          throw new FatSecretApiError('PREMIER_REQUIRED', 'Basic search cannot honor the requested filters or localization. Omit those options for US Basic search, or configure authorized Premier scopes.');
+        }
+        const { search_expression, max_results, page_number } = args;
+        const { data } = await this.publicClient.GET('/foods/search/v1', {
+          params: { query: { search_expression, max_results, page_number, format: 'json' } },
         });
-        return text(data);
+        const normalized = normalizeResponse(data) as { foods?: { food?: unknown[]; max_results?: string; total_results?: string; page_number?: string } };
+        if (!normalized.foods) throw new FatSecretApiError('INVALID_RESPONSE');
+        const { food = [], ...pagination } = normalized.foods;
+        return apiText({
+          foods_search: {
+            max_results: max_results ?? 20, page_number: page_number ?? 0,
+            total_results: null, ...pagination, results: { food },
+          },
+          search_mode: 'basic',
+          limitations: ['Basic search returns summary nutrition. Call get_food for exact serving IDs, measurement units, and nutrition.'],
+        }, schemas.SearchFoodsOutputSchema);
       },
     );
 
@@ -238,11 +333,21 @@ class FatSecretMcpServer {
         outputSchema: schemas.GetFoodOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
-      async (args) => {
-        const { data } = await this.publicClient.GET('/food/v5', {
-          params: { query: { ...args, format: 'json' } },
-        });
-        return text(data);
+      async ({ source = 'auto', ...args }) => {
+        const query = { params: { query: { ...args, format: 'json' } } };
+        if (source === 'personal') {
+          const { data } = await this.profileFoodClient.GET('/food/v5', query);
+          return apiText(data, schemas.GetFoodOutputSchema);
+        }
+        try {
+          const { data } = await this.publicClient.GET('/food/v5', query);
+          return apiText(data, schemas.GetFoodOutputSchema);
+        } catch (error) {
+          if (source !== 'auto' || !(error instanceof FatSecretApiError) || String(error.code) !== '106'
+            || !this.oauth1Credentials.accessToken || !this.oauth1Credentials.accessTokenSecret || !this.oauth1Credentials.consumerSecret) throw error;
+          const { data } = await this.profileFoodClient.GET('/food/v5', query);
+          return apiText(data, schemas.GetFoodOutputSchema);
+        }
       },
     );
 
@@ -256,9 +361,9 @@ class FatSecretMcpServer {
       },
       async ({ barcode, ...rest }) => {
         const { data } = await this.publicClient.GET('/food/barcode/find-by-id/v2', {
-          params: { query: { barcode: Number(barcode), ...rest, format: 'json' } },
+          params: { query: { barcode, ...rest, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.FindFoodByBarcodeOutputSchema);
       },
     );
 
@@ -274,7 +379,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/food/autocomplete/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.AutocompleteFoodsOutputSchema);
       },
     );
   }
@@ -294,7 +399,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/recipes/search/v3', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.SearchRecipesOutputSchema);
       },
     );
 
@@ -310,7 +415,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/recipe/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetRecipeOutputSchema);
       },
     );
   }
@@ -330,7 +435,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/food-categories/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetFoodCategoriesOutputSchema);
       },
     );
 
@@ -346,7 +451,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/food-sub-categories/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetFoodSubCategoriesOutputSchema);
       },
     );
 
@@ -362,7 +467,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/brands/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetBrandsOutputSchema);
       },
     );
 
@@ -378,7 +483,7 @@ class FatSecretMcpServer {
         const { data } = await this.publicClient.GET('/recipe-types/v2', {
           params: { query: { format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetRecipeTypesOutputSchema);
       },
     );
   }
@@ -398,7 +503,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/food-entries/v2', {
           params: { query: buildGetFoodEntriesQuery({ ...rest, date }) },
         });
-        return text(data);
+        return apiText(data, schemas.GetFoodEntriesOutputSchema);
       },
     );
 
@@ -414,39 +519,35 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/food-entries/month/v2', {
           params: { query: { date: optionalDateToDays(date), format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetFoodEntriesMonthOutputSchema);
       },
     );
 
     server.registerTool(
       'create_food_entry',
       {
-        description: 'Creates a food diary entry and returns the recorded entry with its ID and nutrition. Use when the user asks to log food; first use search_foods and get_food to obtain food_id and a real serving_id, because derived serving_id 0 cannot be logged. Requires profile auth; use check_auth_status first.',
+        description: 'Creates a diary entry, reads it back, and checks the recorded quantity and optional expected nutrition. Reuse request_id for retries. Identical existing portions return already_exists unless allow_duplicate=true. Use when the user asks to log food; first use search_foods and get_food to obtain food_id and a real serving_id, because derived serving_id 0 cannot be logged. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CreateFoodEntryInputSchema,
         outputSchema: schemas.CreateFoodEntryOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
-      async ({ date, ...rest }) => {
-        const { data } = await this.profileClient.POST('/food-entries/v1', {
-          params: { query: { ...rest, date: optionalDateToDays(date), format: 'json' } },
-        });
-        return text(data);
+      async (args) => {
+        const data = await this.diary.create(args);
+        return apiText(data, schemas.CreateFoodEntryOutputSchema);
       },
     );
 
     server.registerTool(
       'edit_food_entry',
       {
-        description: 'Updates an existing diary entry\'s label, serving, quantity, or meal. Use get_food_entries to obtain food_entry_id; this cannot change the entry date, so delete and recreate the entry to move it to another date. Requires profile auth; use check_auth_status first.',
+        description: 'Updates one diary entry and reads it back to check its label, serving, quantity, and meal. Use get_food_entries to obtain food_entry_id; this cannot change the entry date, so delete and recreate the entry to move it to another date. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.EditFoodEntryInputSchema,
         outputSchema: schemas.EditFoodEntryOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
       async (args) => {
-        const { data } = await this.profileClient.PUT('/food-entries/v1', {
-          params: { query: { ...args, format: 'json' } },
-        });
-        return text(data);
+        const data = await this.diary.edit(args);
+        return apiText(data, schemas.EditFoodEntryOutputSchema);
       },
     );
 
@@ -459,49 +560,36 @@ class FatSecretMcpServer {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
-        const { data } = await this.profileClient.DELETE('/food-entries/v1', {
-          params: { query: { ...args, format: 'json' } },
-        });
-        return text(data);
+        const data = await this.diary.delete(args.food_entry_id);
+        return apiText(data, schemas.DeleteFoodEntryOutputSchema);
       },
     );
 
     server.registerTool(
       'copy_food_entries',
       {
-        description: 'Copies diary entries from one calendar date to another, optionally for only one meal bucket. Use when the user wants to repeat food they already logged on another date; use copy_saved_meal_entries instead when the source is a saved meal. Requires profile auth; use check_auth_status first.',
+        description: 'Copies diary entries between dates and reads the destination back. Reuse request_id for retries. Existing matching entries prevent duplicate copies; partial overlaps require review. Use when the user wants to repeat food they already logged on another date; use copy_saved_meal_entries instead when the source is a saved meal. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CopyFoodEntriesInputSchema,
         outputSchema: schemas.CopyFoodEntriesOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
-      async ({ from_date, to_date, ...rest }) => {
-        const { data } = await this.profileClient.POST('/food-entries/copy/v1', {
-          params: {
-            query: {
-              ...rest,
-              from_date: dateToDays(from_date),
-              to_date: dateToDays(to_date),
-              format: 'json',
-            },
-          },
-        });
-        return text(data);
+      async (args) => {
+        const data = await this.diary.copy(args);
+        return apiText(data, schemas.CopyFoodEntriesOutputSchema);
       },
     );
 
     server.registerTool(
       'copy_saved_meal_entries',
       {
-        description: 'Copies every item in a saved meal into a selected diary meal and date. Use when the user wants to log a saved meal; obtain saved_meal_id from get_saved_meals, and use copy_food_entries instead to copy an existing diary date. Requires profile auth; use check_auth_status first.',
+        description: 'Copies a saved meal into a diary date and reads the new entries back. Reuse request_id for retries. Existing matching entries prevent duplicate copies; partial overlaps require review. Use when the user wants to log a saved meal; obtain saved_meal_id from get_saved_meals, and use copy_food_entries instead to copy an existing diary date. Requires profile auth; use check_auth_status first.',
         inputSchema: schemas.CopySavedMealEntriesInputSchema,
         outputSchema: schemas.CopySavedMealEntriesOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
-      async ({ date, ...rest }) => {
-        const { data } = await this.profileClient.POST('/food-entries/copy/saved-meal/v1', {
-          params: { query: { ...rest, date: optionalDateToDays(date), format: 'json' } },
-        });
-        return text(data);
+      async (args) => {
+        const data = await this.diary.copySaved(args);
+        return apiText(data, schemas.CopySavedMealEntriesOutputSchema);
       },
     );
   }
@@ -521,7 +609,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/food/favorites/v2', {
           params: { query: { format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetFavoriteFoodsOutputSchema);
       },
     );
 
@@ -534,10 +622,10 @@ class FatSecretMcpServer {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       },
       async (args) => {
-        const { data } = await this.profileClient.POST('/food/favorite/v1', {
+        const { data } = await this.profileClient.DELETE('/food/favorite/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.DeleteFavoriteFoodOutputSchema);
       },
     );
 
@@ -553,7 +641,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/food/most-eaten/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetMostEatenFoodsOutputSchema);
       },
     );
 
@@ -569,7 +657,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/food/recently-eaten/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetRecentlyEatenFoodsOutputSchema);
       },
     );
 
@@ -585,7 +673,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/recipe/favorites/v2', {
           params: { query: { format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetFavoriteRecipesOutputSchema);
       },
     );
 
@@ -601,7 +689,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.POST('/recipe/favorites/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.AddFavoriteRecipeOutputSchema);
       },
     );
 
@@ -617,7 +705,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.DELETE('/recipe/favorites/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.DeleteFavoriteRecipeOutputSchema);
       },
     );
   }
@@ -637,7 +725,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/saved-meals/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetSavedMealsOutputSchema);
       },
     );
 
@@ -653,7 +741,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.POST('/saved-meals/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.CreateSavedMealOutputSchema);
       },
     );
 
@@ -669,7 +757,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.PUT('/saved-meals/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.EditSavedMealOutputSchema);
       },
     );
 
@@ -685,7 +773,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.DELETE('/saved-meals/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.DeleteSavedMealOutputSchema);
       },
     );
 
@@ -701,7 +789,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/saved-meals/item/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetSavedMealItemsOutputSchema);
       },
     );
 
@@ -717,7 +805,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.POST('/saved-meals/item/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.AddSavedMealItemOutputSchema);
       },
     );
 
@@ -733,7 +821,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.PUT('/saved-meals/item/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.EditSavedMealItemOutputSchema);
       },
     );
 
@@ -749,7 +837,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.DELETE('/saved-meals/item/v1', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.DeleteSavedMealItemOutputSchema);
       },
     );
   }
@@ -769,7 +857,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.POST('/weight/v1', {
           params: { query: { ...rest, date: optionalDateToDays(date), format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.UpdateWeightOutputSchema);
       },
     );
 
@@ -785,7 +873,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/weight/month/v2', {
           params: { query: { date: optionalDateToDays(date), format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetWeightMonthOutputSchema);
       },
     );
   }
@@ -805,7 +893,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/exercises/v2', {
           params: { query: { format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetExercisesOutputSchema);
       },
     );
 
@@ -821,7 +909,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.PUT('/exercise-entries/v1', {
           params: { query: { ...rest, date: optionalDateToDays(date), format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.EditExerciseEntriesOutputSchema);
       },
     );
 
@@ -837,7 +925,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/exercise-entries/month/v2', {
           params: { query: { date: optionalDateToDays(date), format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetExerciseEntriesMonthOutputSchema);
       },
     );
 
@@ -853,7 +941,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.POST('/exercise-entries/day/v1', {
           params: { query: { ...rest, date: optionalDateToDays(date), format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.SaveExerciseTemplateOutputSchema);
       },
     );
   }
@@ -873,7 +961,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.GET('/profile/v1', {
           params: { query: { format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.GetProfileOutputSchema);
       },
     );
 
@@ -889,7 +977,7 @@ class FatSecretMcpServer {
         const { data } = await this.profileClient.POST('/food/v2', {
           params: { query: { ...args, format: 'json' } },
         });
-        return text(data);
+        return apiText(data, schemas.CreateFoodOutputSchema);
       },
     );
   }
@@ -907,10 +995,12 @@ class FatSecretMcpServer {
       },
       async () => {
         const hasCredentials = this.hasApiCredentials();
-        const hasTokens = !!(this.oauth1Credentials.accessToken && this.oauth1Credentials.accessTokenSecret);
+        const hasTokens = !!(this.oauth1Credentials.consumerSecret && this.oauth1Credentials.accessToken && this.oauth1Credentials.accessTokenSecret);
 
         if (!hasCredentials) {
           return text({
+            public_credentials_configured: false,
+            requested_scopes: this.requestedScopes, granted_scopes: this.grantedScopes, entitlements_verified: false,
             credentials_configured: false,
             profile_authenticated: false,
             config_path: this.getConfigPath(),
@@ -921,12 +1011,14 @@ class FatSecretMcpServer {
         }
 
         return text({
+          public_credentials_configured: true,
+          requested_scopes: this.requestedScopes, granted_scopes: this.grantedScopes, entitlements_verified: false,
           credentials_configured: true,
           profile_authenticated: hasTokens,
           config_path: this.getConfigPath(),
           message: hasTokens
-            ? 'Fully configured. API credentials and profile authentication are ready. All tools are available.'
-            : 'API credentials configured (public tools work). Profile not authenticated — use start_auth to authorize profile access.',
+            ? 'Public credentials and profile authorization are stored. Token validity and account entitlements are unverified. Premier and barcode operations require additional authorization.'
+            : 'Public credentials are stored. Account entitlements are unverified. Profile not authenticated — use start_auth to authorize profile access.',
         });
       },
     );
@@ -960,6 +1052,7 @@ class FatSecretMcpServer {
         // Reset OAuth 2.0 token (new credentials)
         this.oauth2Token = null;
         this.oauth2TokenExpiry = 0;
+        this.grantedScopes = null;
 
         // Clear stale OAuth tokens when credentials change
         this.oauth1Credentials.accessToken = undefined;
@@ -990,12 +1083,12 @@ class FatSecretMcpServer {
         annotations: { readOnlyHint: true, idempotentHint: false },
       },
       async () => {
-        this.ensureApiCredentials();
+        this.ensureOAuth1Credentials();
         // Use only consumer key/secret for request token (no access tokens)
         const result = await requestToken({
           consumerKey: this.oauth1Credentials.consumerKey,
           consumerSecret: this.oauth1Credentials.consumerSecret,
-        });
+        }, this.rawFetcher);
         this.pendingOAuth = { token: result.oauthToken, secret: result.oauthTokenSecret };
         return text({
           message: 'Visit the URL below to authorize the app, then use complete_auth with the verifier code.',
@@ -1021,6 +1114,7 @@ class FatSecretMcpServer {
           this.pendingOAuth.token,
           this.pendingOAuth.secret,
           verifier,
+          this.rawFetcher,
         );
         this.saveConfig({ accessToken: result.accessToken, accessTokenSecret: result.accessTokenSecret });
         this.oauth1Credentials.accessToken = result.accessToken;
@@ -1104,15 +1198,10 @@ class FatSecretMcpServer {
 
 export { FatSecretMcpServer };
 
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-});
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled rejection:', err);
-});
-
-const server = new FatSecretMcpServer();
-server.run().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  const server = new FatSecretMcpServer();
+  server.run().catch(() => {
+    console.error('Failed to start FatSecret MCP server. Check local configuration and port availability.');
+    process.exit(1);
+  });
+}

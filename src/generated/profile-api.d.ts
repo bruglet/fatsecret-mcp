@@ -146,7 +146,8 @@ export interface paths {
          *
          *     [more info](https://platform.fatsecret.com/api/Default.aspx?screen=rapiref&method=food.delete_favorite)
          */
-        post: {
+        post?: never;
+        delete: {
             parameters: {
                 query?: {
                     /**
@@ -185,7 +186,6 @@ export interface paths {
                 };
             };
         };
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
