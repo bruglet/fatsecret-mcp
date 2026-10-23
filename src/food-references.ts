@@ -22,9 +22,10 @@ type Part = z.infer<typeof PartSchema>;
 const CoreNutrients = ['calories', 'protein', 'carbohydrate', 'fat'] as const;
 const NutritionSchema = z.object({ calories: z.number().finite().nonnegative(), protein: z.number().finite().nonnegative(), carbohydrate: z.number().finite().nonnegative(), fat: z.number().finite().nonnegative() });
 export interface FoodDetail {
-  food_id: string | number; food_name: string;
+  food_id: string | number; food_name: string; brand_name?: string | null;
   servings?: { serving: { serving_id: string | number; number_of_units?: string | number | null;
     measurement_description?: string | null; serving_description?: string | null;
+    metric_serving_amount?: string | number | null; metric_serving_unit?: string | null;
     calories?: string | number | null; protein?: string | number | null;
     carbohydrate?: string | number | null; fat?: string | number | null }[] } | null;
 }

@@ -36,7 +36,7 @@ export const SearchFoodsInputSchema = pub.get__foods_search_v5.parameters.shape.
 export const GetFoodInputSchema = pub.get__food_v5.parameters.shape.query
   .omit({ format: true })
   .extend({
-    source: z.enum(['auto', 'public', 'personal']).optional().describe('Auto and public use the public database. Personal lookup is disabled until its API behavior is verified.'),
+    source: z.enum(['auto', 'public', 'personal']).optional().describe('Auto uses public lookup, with an experimental signed fallback only after error 106. Public never falls back. Personal requires the experimental server setting and profile authorization.'),
     food_id: z.number().int().positive().describe('Food ID returned by search_foods, find_food_by_barcode, a food-list tool, or create_food.'),
     include_sub_categories: z.boolean().optional().describe('Whether to include the food\'s subcategory names; Premier only.'),
     include_food_images: z.boolean().optional().describe('Whether to include food image URLs; requires the separate Premier images offering.'),
@@ -278,6 +278,8 @@ export const DeleteSavedMealItemInputSchema = profile.delete__savedMeals_item_v1
 export const CreateFoodInputSchema = profile.post__food_v2.parameters.shape.query
   .omit({ format: true })
   .extend({
+    request_id: RequestIdField,
+    allow_unverified_visibility: z.boolean().optional().describe('Explicit test-only consent to create a food whose visibility is unverified. Requires the experimental server setting and an authorized disposable profile.'),
     brand_type: z.enum(['manufacturer', 'restaurant', 'supermarket']).default('manufacturer').describe('Brand category for the custom food.'),
     brand_name: z.string().describe('Brand name for the custom food, such as "Acme".'),
     food_name: z.string().describe('Food name without the brand, such as "Whole Wheat Bread".'),
@@ -902,7 +904,18 @@ export const SaveExerciseTemplateOutputSchema = fatSecretOutput(SuccessDataSchem
 
 // Profile
 export const GetProfileOutputSchema = fatSecretOutput(ProfileDataSchema);
-export const CreateFoodOutputSchema = fatSecretOutput(idDataSchema('food_id'));
+export const CreateFoodOutputSchema = fatSecretOutput(idDataSchema('food_id').extend({
+  serving_id: ValueSchema.optional(),
+  number_of_units: z.number().finite().positive().optional(),
+  visibility: z.literal('unverified').optional(),
+  replayed: z.boolean().optional(),
+  verification: z.object({
+    matched: z.literal(true),
+    nutrition: z.object({ calories: z.number(), protein: z.number(), carbohydrate: z.number(), fat: z.number() }),
+    differences: z.record(z.number()),
+    tolerance: z.object({ calories: z.number(), grams: z.number() }),
+  }).optional(),
+}));
 
 // OAuth Flow
 export const CheckAuthStatusOutputSchema = z.object({

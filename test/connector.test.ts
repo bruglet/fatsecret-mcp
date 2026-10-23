@@ -21,13 +21,14 @@ const entry = (id: number, overrides = {}) => ({ food_entry_id: String(id), food
   food_entry_name: 'Chicken', calories: '300', protein: '30', carbohydrate: '15', fat: '7.5', ...overrides });
 
 type Handler = (url: URL, request: Request) => unknown | Promise<unknown>;
-async function connect(t: TestContext, handler: Handler, options: { directory?: string; scopes?: string; profile?: boolean } = {}) {
+async function connect(t: TestContext, handler: Handler, options: { directory?: string; scopes?: string; profile?: boolean; experimental?: boolean } = {}) {
   const directory = options.directory ?? mkdtempSync(join(tmpdir(), 'fatsecret-connector-'));
-  const names = ['FATSECRET_CONFIG_DIR', 'FATSECRET_OAUTH_SCOPES', 'FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET', 'FATSECRET_CONSUMER_SECRET'];
+  const names = ['FATSECRET_ENABLE_EXPERIMENTAL_FOODS', 'FATSECRET_CONFIG_DIR', 'FATSECRET_OAUTH_SCOPES', 'FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET', 'FATSECRET_CONSUMER_SECRET'];
   const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
   names.forEach(name => { delete process.env[name]; });
   process.env.FATSECRET_CONFIG_DIR = directory;
   if (options.scopes) process.env.FATSECRET_OAUTH_SCOPES = options.scopes;
+  if (options.experimental) process.env.FATSECRET_ENABLE_EXPERIMENTAL_FOODS = 'true';
   writeFileSync(join(directory, 'config.json'), JSON.stringify({ clientId: 'test-client', clientSecret: 'test-secret',
     ...(options.profile === false ? {} : { consumerSecret: 'test-consumer-secret', accessToken: 'test-profile-token', accessTokenSecret: 'test-profile-secret' }) }), { mode: 0o600 });
   const requests: Request[] = [];
@@ -452,4 +453,44 @@ test('food detail options survive connector routing', async t => {
     return { food };
   });
   assert.ok(!(await call('get_food', { food_id: 1, region: 'FR', include_food_images: true })).isError);
+});
+
+
+test('experimental personal fallback is signed, preserves options, and never changes public-only reads', async t => {
+  const { call, requests } = await connect(t, url => {
+    if (!url.searchParams.has('oauth_token')) return { error: { code: 106, message: 'Invalid ID' } };
+    assert.equal(url.searchParams.get('region'), 'FR');
+    assert.ok(url.searchParams.has('oauth_signature'));
+    return { food };
+  }, { experimental: true });
+  assert.ok(!(await call('get_food', { food_id: 1, region: 'FR' })).isError);
+  assert.ok(!JSON.stringify(await call('get_food', { food_id: 1, region: 'FR', source: 'personal' })).includes('test-profile-token'));
+  const count = requests.length;
+  assert.equal((await call('get_food', { food_id: 1, source: 'public' })).isError, true);
+  assert.equal(requests.length, count + 1);
+});
+
+test('experimental creation checks consent, sends only API fields, and verifies a real serving', async t => {
+  let writes = 0;
+  const args = { food_name: 'Test', brand_name: 'Test', serving_size: '100 g', serving_amount: '100', serving_amount_unit: 'g',
+    calories: 200, protein: 20, carbohydrate: 10, fat: 5, request_id: 'approved-disposable-test' };
+  const { call } = await connect(t, (url, request) => {
+    assert.ok(url.searchParams.has('oauth_token'));
+    assert.equal(url.searchParams.has('request_id'), false);
+    assert.equal(url.searchParams.has('allow_unverified_visibility'), false);
+    if (request.method === 'POST') { writes++; return { food_id: { value: '9' } }; }
+    assert.equal(url.searchParams.get('food_id'), '9');
+    return { food: { ...food, food_id: '9', food_name: 'Test', brand_name: 'Test' } };
+  }, { experimental: true });
+  assert.equal((await call('create_food', args)).isError, true);
+  assert.equal(writes, 0);
+  const result = await call('create_food', { ...args, allow_unverified_visibility: true });
+  assert.ok(!result.isError, JSON.stringify(result));
+  const data = result.structuredContent!.data as any;
+  assert.equal(data.visibility, 'unverified');
+  assert.equal(data.serving_id.value, '11');
+  assert.equal(data.number_of_units, 100);
+  assert.deepEqual(data.verification.differences, { calories: 0, protein: 0, carbohydrate: 0, fat: 0 });
+  assert.ok(!(await call('create_food', { ...args, allow_unverified_visibility: true })).isError);
+  assert.equal(writes, 1);
 });

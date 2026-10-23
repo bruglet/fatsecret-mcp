@@ -187,3 +187,11 @@ See [food logging](docs/food-logging.md) and the [source review](docs/food-skill
 The earlier signed personal-food fallback is disabled by default. Custom-food creation is also disabled by default.
 These paths need a disposable-profile check for retrieval, serving identifiers, exact nutrients, and visibility.
 No build, deployment, plugin publication, or production write was performed in this follow-up.
+
+
+## Isolated experimental adapter
+
+A separate commit adds opt-in signed personal-food lookup and journaled custom-food creation with nutrition verification.
+The flag is disabled by default. Creation also requires explicit unverified-visibility consent, a request ID, and a standardized g/ml quantity.
+Mock tests cover retries, cross-session journals, partial failures, derived servings, nutrient mismatches, and unchanged public-only behavior.
+No live privacy claim or API round trip is verified. See [API assumptions](docs/api-assumptions.md) before any test-profile use.

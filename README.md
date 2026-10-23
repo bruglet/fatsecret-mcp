@@ -183,6 +183,7 @@ The connector does not invent serving identifiers or missing nutrient values.
 `get_food` accepts `source: "auto"`, `"public"`, or `"personal"`.
 The default uses public lookup. Signed personal-food lookup is disabled until API behavior is verified.
 An invalid personal ID produces a controlled error; it does not trigger food recreation.
+A separate [experimental adapter](docs/api-assumptions.md) adds opt-in disposable-profile checks. It is disabled by default.
 
 `check_auth_status` reports stored credentials and requested scopes separately from account entitlements.
 `FATSECRET_OAUTH_SCOPES` defaults to `basic`.
