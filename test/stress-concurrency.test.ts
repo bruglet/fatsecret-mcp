@@ -136,7 +136,7 @@ test('Stress Challenge 1: Concurrent Sessions & Session Isolation', async (t) =>
       assert.strictEqual(res.jsonRpc?.id, 100 + i, `Response ID should match client request ID for client ${i}`);
       const tools = (res.jsonRpc?.result as { tools?: unknown[] })?.tools;
       assert.ok(Array.isArray(tools), `Client ${i} must receive tools array`);
-      assert.strictEqual(tools!.length, 44, `Client ${i} must see all 44 registered tools`);
+      assert.strictEqual(tools!.length, 48, `Client ${i} must see all 48 registered tools`);
     }
   });
 
@@ -326,7 +326,7 @@ test('Stress Challenge 3: Session Termination & Teardown Lifecycle', async (t) =
       const listRes = await client.listTools();
       assert.strictEqual(listRes.status, 200, `Survivor client ${sIdx} must remain active and functional`);
       const tools = (listRes.jsonRpc?.result as { tools?: unknown[] })?.tools;
-      assert.strictEqual(tools?.length, 44, `Survivor client ${sIdx} must see all 44 tools`);
+      assert.strictEqual(tools?.length, 48, `Survivor client ${sIdx} must see all 48 tools`);
     }
   });
 

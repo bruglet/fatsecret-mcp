@@ -116,14 +116,14 @@ test('null collections and optional nutrition do not cause output-schema failure
   }
 });
 
-test('personal food lookup uses signed user authorization only after public error 106', async t => {
-  const { call, requests } = await connect(t, url => url.searchParams.has('oauth_token') ? { food } : { error: { code: 106, message: 'Invalid ID' } });
-  const result = await call('get_food', { food_id: 123783004 });
-  assert.ok(!result.isError, JSON.stringify(result));
-  const signed = new URL(requests.at(-1)!.url);
-  assert.equal(signed.searchParams.get('oauth_token'), 'test-profile-token');
-  assert.ok(signed.searchParams.has('oauth_signature'));
-  assert.ok(!JSON.stringify(result).includes('test-profile-token'));
+test('unverified personal lookup is disabled and public errors never trigger it', async t => {
+  const { call, requests } = await connect(t, () => ({ error: { code: 106, message: 'Invalid ID' } }));
+  assert.equal((await call('get_food', { food_id: 123783004 })).isError, true);
+  assert.equal(requests.length, 2);
+  const result = await call('get_food', { food_id: 123783004, source: 'personal' });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result), /PERSONAL_FOOD_UNVERIFIED/);
+  assert.equal(requests.length, 2);
 });
 
 test('invalid public ID stays controlled without profile authorization', async t => {
@@ -399,4 +399,57 @@ test('copy operations reject derived or invalid source portions before writing',
     assert.match(JSON.stringify(result.content), /INVALID_COPY_SOURCE/);
   }
   assert.equal(fixture.writes.length, 0);
+});
+
+
+test('personal discovery merges IDs, handles empty sources, and reports failed sources', async t => {
+  const { call } = await connect(t, url => {
+    if (url.pathname === '/rest/food/most-eaten/v2') return { error: { code: 14, message: 'unavailable' } };
+    if (url.pathname === '/rest/saved-meals/v2') return { saved_meals: null };
+    return { foods: { food: { food_id: '1', food_name: 'Chicken', food_type: 'Generic', food_url: 'https://example.test/food' } } };
+  });
+  const result = await call('search_personal_foods', { query: 'chicken' });
+  assert.ok(!result.isError, JSON.stringify(result));
+  const data = result.structuredContent!.data as any;
+  assert.equal(data.matches.length, 1);
+  assert.deepEqual(data.matches[0].sources, ['favorites', 'recent']);
+  assert.deepEqual(data.unavailable_sources, [{ source: 'frequent', code: '14' }]);
+  assert.equal(data.incomplete, true);
+});
+
+test('references validate serving IDs and get fresh nutrition through the actual MCP server', async t => {
+  let calories = '200';
+  const { call } = await connect(t, url => {
+    assert.equal(url.pathname, '/rest/food/v5');
+    return { food: { ...food, servings: { serving: { ...food.servings.serving, calories } } } };
+  });
+  const args = { name: 'Food Box entrée', notes: 'Excludes separately logged rice.', approved: true,
+    parts: [{ food_id: 1, serving_id: 11, number_of_units: 150 }] };
+  assert.equal((await call('save_food_reference', { ...args, approved: false })).isError, true);
+  assert.equal((await call('save_food_reference', { ...args, parts: [{ food_id: 1, serving_id: 999, number_of_units: 150 }] })).isError, true);
+  assert.ok(!(await call('save_food_reference', args)).isError);
+  calories = '240';
+  const result = await call('get_food_reference', { name: 'food box entrée' });
+  assert.ok(!result.isError, JSON.stringify(result));
+  const data = result.structuredContent!.data as any;
+  assert.equal(data.totals.calories, 360);
+  assert.equal(data.parts[0].measurement_description, 'g');
+});
+
+test('custom creation sends no request while visibility is unverified', async t => {
+  const { call, requests } = await connect(t, () => { throw new Error('No API request expected'); });
+  const result = await call('create_food', { food_name: 'Test', brand_name: 'Test', serving_size: '1 serving', calories: 10, protein: 1, carbohydrate: 1, fat: 0.2 });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result), /CUSTOM_FOOD_UNVERIFIED/);
+  assert.equal(requests.length, 0);
+});
+
+
+test('food detail options survive connector routing', async t => {
+  const { call } = await connect(t, url => {
+    assert.equal(url.searchParams.get('region'), 'FR');
+    assert.equal(url.searchParams.get('include_food_images'), 'true');
+    return { food };
+  });
+  assert.ok(!(await call('get_food', { food_id: 1, region: 'FR', include_food_images: true })).isError);
 });

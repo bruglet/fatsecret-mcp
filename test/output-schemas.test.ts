@@ -6,11 +6,13 @@ import * as schemas from '../src/schemas.js';
 import { text } from '../src/tool-output.js';
 
 const indexSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+const referenceSource = readFileSync(new URL('../src/food-references.ts', import.meta.url), 'utf8');
 
 test('every registered tool declares an output schema', () => {
   const registrationBlocks = indexSource.split('server.registerTool(').slice(1);
 
   assert.equal(registrationBlocks.length, 44);
+  assert.equal(referenceSource.split('server.registerTool(').length - 1, 4);
   for (const block of registrationBlocks) {
     const toolName = block.match(/^\s*'([^']+)'/)?.[1] ?? 'unknown';
     const config = block.slice(0, block.indexOf('\n      async'));

@@ -36,7 +36,7 @@ export const SearchFoodsInputSchema = pub.get__foods_search_v5.parameters.shape.
 export const GetFoodInputSchema = pub.get__food_v5.parameters.shape.query
   .omit({ format: true })
   .extend({
-    source: z.enum(['auto', 'public', 'personal']).optional().describe('Use auto to try the public database, then user authorization for an unavailable personal food ID. Personal requires profile authorization.'),
+    source: z.enum(['auto', 'public', 'personal']).optional().describe('Auto and public use the public database. Personal lookup is disabled until its API behavior is verified.'),
     food_id: z.number().int().positive().describe('Food ID returned by search_foods, find_food_by_barcode, a food-list tool, or create_food.'),
     include_sub_categories: z.boolean().optional().describe('Whether to include the food\'s subcategory names; Premier only.'),
     include_food_images: z.boolean().optional().describe('Whether to include food image URLs; requires the separate Premier images offering.'),

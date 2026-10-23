@@ -1,0 +1,17 @@
+{
+  "apps": "./.app.json",
+  "author": { "name": "App developer" },
+  "description": "Retrieve your food diary and nutrition data from fatsecret",
+  "interface": {
+    "capabilities": [],
+    "category": "Other",
+    "defaultPrompt": null,
+    "developerName": "App developer",
+    "displayName": "Fatsecret",
+    "longDescription": "Retrieve your food diary and nutrition data from fatsecret",
+    "shortDescription": "Retrieve your food diary and nutrition data from fatsecret"
+  },
+  "name": "dev-6a9a238119a08191a73862cafd1283c5",
+  "version": "1.0.1",
+  "skills": "./skills/"
+}

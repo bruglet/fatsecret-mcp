@@ -63,7 +63,11 @@
     { "name": "setup_credentials", "description": "Configure FatSecret API credentials" },
     { "name": "start_auth", "description": "Start OAuth 1.0 authorization for profile access" },
     { "name": "complete_auth", "description": "Complete OAuth with verifier code" },
-    { "name": "check_auth_status", "description": "Check profile authentication status" }
+    { "name": "check_auth_status", "description": "Check profile authentication status" },
+    { "name": "search_personal_foods", "description": "Search personal discovery sources and approved references" },
+    { "name": "save_food_reference", "description": "Save an approved reusable reference to verified foods" },
+    { "name": "get_food_reference", "description": "Retrieve fresh nutrition for a reusable reference" },
+    { "name": "delete_food_reference", "description": "Delete a local reference without changing FatSecret records" }
   ],
   "user_config": {
     "FATSECRET_CLIENT_ID": {

@@ -181,8 +181,8 @@ Basic access uses `foods.search` v1. Search results include summary nutrition an
 The connector does not invent serving identifiers or missing nutrient values.
 
 `get_food` accepts `source: "auto"`, `"public"`, or `"personal"`.
-The default tries user authorization after a public invalid-ID response.
-This path requires profile authorization. Retrieval of existing private foods still requires live verification.
+The default uses public lookup. Signed personal-food lookup is disabled until API behavior is verified.
+An invalid personal ID produces a controlled error; it does not trigger food recreation.
 
 `check_auth_status` reports stored credentials and requested scopes separately from account entitlements.
 `FATSECRET_OAUTH_SCOPES` defaults to `basic`.
@@ -213,7 +213,8 @@ Local diary operations run sequentially. Separate server processes require share
 If a request has an unknown outcome, inspect the diary before authorizing another write.
 The connector never deletes unrelated entries to resolve overlaps.
 
-Private custom-food creation and the food-recognition plugin skill remain separate work.
+Custom-food creation remains disabled until visibility and retrieval are verified.
+The [food logging guide](docs/food-logging.md) covers the new personal discovery and reference tools, plus the packaged plugin skill.
 No live diary writes formed part of the v2 regression tests.
 
 The isolated regression command is:

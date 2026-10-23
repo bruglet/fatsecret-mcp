@@ -172,3 +172,18 @@ Food Box values and historical entries remain unchanged.
 Final local verification: 150 tests passed, with zero failures.
 Build, lint, type-checking, and the Git whitespace check passed.
 These results cover mocked API behavior and local transport tests, not production write verification.
+
+
+## Reusable catalog and plugin source follow-up
+
+Four tools add partial personal discovery and account-scoped approved food references.
+References persist IDs, quantities, and user-authored labels; nutrition is fetched on each retrieval.
+Revision checks protect unrelated edits. Tests use temporary storage and mocked API responses.
+
+The plugin source preserves the existing private app binding and adds the food logging skill.
+The separate personal Skills library and published plugin remain unchanged.
+See [food logging](docs/food-logging.md) and the [source review](docs/food-skill-research.md).
+
+The earlier signed personal-food fallback is disabled by default. Custom-food creation is also disabled by default.
+These paths need a disposable-profile check for retrieval, serving identifiers, exact nutrients, and visibility.
+No build, deployment, plugin publication, or production write was performed in this follow-up.

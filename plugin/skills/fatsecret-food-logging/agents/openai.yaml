@@ -1,0 +1,6 @@
+interface:
+  display_name: "FatSecret Food Logging"
+  short_description: "Estimate meals and approve FatSecret logging"
+  default_prompt: "Use $fatsecret-food-logging to estimate this meal, show the nutrition and assumptions, and ask for approval before logging it."
+policy:
+  allow_implicit_invocation: true

@@ -18,6 +18,7 @@ import { cloudflareAccessAuth } from './auth-middleware.js';
 import { text, apiText } from './tool-output.js';
 import { apiFetch, FatSecretApiError, normalizeResponse } from './api-response.js';
 import { DiaryOperations, type DiaryEntry } from './diary-operations.js';
+import { FoodReferences, registerFoodReferenceTools, type PersonalCandidate, type FoodDetail } from './food-references.js';
 
 const require = createRequire(import.meta.url);
 const { version } = require('../package.json');
@@ -40,7 +41,6 @@ class FatSecretMcpServer {
 
   private publicClient: ReturnType<typeof createClient<PublicPaths>>;
   private profileClient: ReturnType<typeof createClient<ProfilePaths>>;
-  private profileFoodClient: ReturnType<typeof createClient<PublicPaths>>;
 
   private oauth1Credentials: OAuth1Credentials;
   private diary: DiaryOperations;
@@ -88,8 +88,6 @@ class FatSecretMcpServer {
       },
     };
     this.profileClient.use(oauth1Middleware);
-    this.profileFoodClient = createClient<PublicPaths>({ baseUrl: BASE_URL, fetch: this.fetcher });
-    this.profileFoodClient.use(oauth1Middleware);
     this.diary = new DiaryOperations({
       account: () => {
         this.ensureProfileAuth();
@@ -175,6 +173,51 @@ class FatSecretMcpServer {
     this.registerExerciseTools(server);
     this.registerProfileTools(server);
     this.registerAuthTools(server);
+    this.registerPersonalFoodTools(server);
+  }
+
+  private async readFood(food_id: number, options: Record<string, string | number | boolean | undefined> = {}): Promise<FoodDetail> {
+    const { data } = await this.publicClient.GET('/food/v5', { params: { query: { ...options, food_id, format: 'json' } } });
+    const result = apiText(data, schemas.GetFoodOutputSchema);
+    if ('isError' in result && result.isError) throw new FatSecretApiError('FOOD_UNAVAILABLE', 'FatSecret did not return food details.');
+    return (normalizeResponse(data) as { food: FoodDetail }).food;
+  }
+
+  private registerPersonalFoodTools(server: McpServer): void {
+    const account = () => {
+      this.ensureProfileAuth();
+      return JSON.stringify([this.oauth1Credentials.consumerKey, this.oauth1Credentials.accessToken]);
+    };
+    const foods = (source: string, data: unknown, schema: Parameters<typeof apiText>[1]): PersonalCandidate[] => {
+      const result = apiText(data, schema);
+      if ('isError' in result && result.isError) throw new FatSecretApiError('SOURCE_UNAVAILABLE', 'Personal discovery source is unavailable.');
+      return (normalizeResponse(data) as { foods: { food: { food_id: number | string; food_name: string }[] } }).foods.food
+        .map(item => ({ kind: 'food', name: item.food_name, food_id: String(item.food_id), sources: [source] }));
+    };
+    registerFoodReferenceTools(server, {
+      store: new FoodReferences(this.getConfigDir(), account), food: id => this.readFood(id),
+      sources: [
+        { name: 'favorites', read: async () => {
+          const { data } = await this.profileClient.GET('/food/favorites/v2', { params: { query: { format: 'json' } } });
+          return foods('favorites', data, schemas.GetFavoriteFoodsOutputSchema);
+        } },
+        { name: 'recent', read: async () => {
+          const { data } = await this.profileClient.GET('/food/recently-eaten/v2', { params: { query: { format: 'json' } } });
+          return foods('recent', data, schemas.GetRecentlyEatenFoodsOutputSchema);
+        } },
+        { name: 'frequent', read: async () => {
+          const { data } = await this.profileClient.GET('/food/most-eaten/v2', { params: { query: { format: 'json' } } });
+          return foods('frequent', data, schemas.GetMostEatenFoodsOutputSchema);
+        } },
+        { name: 'saved_meals', read: async () => {
+          const { data } = await this.profileClient.GET('/saved-meals/v2', { params: { query: { format: 'json' } } });
+          const result = apiText(data, schemas.GetSavedMealsOutputSchema);
+          if ('isError' in result && result.isError) throw new FatSecretApiError('SOURCE_UNAVAILABLE', 'Saved-meal discovery is unavailable.');
+          return (normalizeResponse(data) as { saved_meals: { saved_meal: { saved_meal_id: number | string; saved_meal_name: string }[] } }).saved_meals.saved_meal
+            .map(item => ({ kind: 'saved_meal', name: item.saved_meal_name, saved_meal_id: String(item.saved_meal_id), sources: ['saved_meals'] }));
+        } },
+      ],
+    });
   }
 
   // ── Config Management ──
@@ -333,21 +376,9 @@ class FatSecretMcpServer {
         outputSchema: schemas.GetFoodOutputSchema,
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
       },
-      async ({ source = 'auto', ...args }) => {
-        const query = { params: { query: { ...args, format: 'json' } } };
-        if (source === 'personal') {
-          const { data } = await this.profileFoodClient.GET('/food/v5', query);
-          return apiText(data, schemas.GetFoodOutputSchema);
-        }
-        try {
-          const { data } = await this.publicClient.GET('/food/v5', query);
-          return apiText(data, schemas.GetFoodOutputSchema);
-        } catch (error) {
-          if (source !== 'auto' || !(error instanceof FatSecretApiError) || String(error.code) !== '106'
-            || !this.oauth1Credentials.accessToken || !this.oauth1Credentials.accessTokenSecret || !this.oauth1Credentials.consumerSecret) throw error;
-          const { data } = await this.profileFoodClient.GET('/food/v5', query);
-          return apiText(data, schemas.GetFoodOutputSchema);
-        }
+      async ({ source = 'auto', food_id, ...options }) => {
+        if (source === 'personal') throw new FatSecretApiError('PERSONAL_FOOD_UNVERIFIED', 'Signed personal-food lookup is not verified for this API account. Use a public match or an existing saved meal with valid serving IDs.');
+        return apiText({ food: await this.readFood(food_id, options) }, schemas.GetFoodOutputSchema);
       },
     );
 
@@ -968,16 +999,13 @@ class FatSecretMcpServer {
     server.registerTool(
       'create_food',
       {
-        description: 'Creates a custom branded food from serving and nutrition data and returns its new food_id. Use when the requested food is absent from search_foods; this does not add it to the diary, so call create_food_entry afterward if needed. Premier only and requires profile auth; use check_auth_status first.',
+        description: 'Custom-food creation is unavailable until visibility and retrieval are verified using a disposable profile. Use save_food_reference to reuse existing food IDs. No creation request is sent by default.',
         inputSchema: schemas.CreateFoodInputSchema,
         outputSchema: schemas.CreateFoodOutputSchema,
         annotations: { readOnlyHint: false, idempotentHint: false },
       },
-      async (args) => {
-        const { data } = await this.profileClient.POST('/food/v2', {
-          params: { query: { ...args, format: 'json' } },
-        });
-        return apiText(data, schemas.CreateFoodOutputSchema);
+      async () => {
+        throw new FatSecretApiError('CUSTOM_FOOD_UNVERIFIED', 'Custom-food visibility and retrieval are unverified. No food was created. Use approved references to existing foods until a disposable-profile round trip confirms API behavior.');
       },
     );
   }
