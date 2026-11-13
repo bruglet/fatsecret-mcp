@@ -111,3 +111,15 @@ test('text output includes matching structured content', () => {
   assert.deepEqual(JSON.parse(output.content[0].text), data);
   assert.deepEqual(text(undefined).structuredContent, { data: null });
 });
+
+test('food search output accepts Basic-plan v1 responses', () => {
+  const result = text({
+    foods: {
+      max_results: '1', total_results: '1', page_number: '0',
+      food: [{ food_id: '1641', food_name: 'Chicken Breast', food_type: 'Generic',
+        food_url: 'https://foods.fatsecret.com/example', food_description: 'Per 100g - Calories: 165kcal' }],
+    },
+  });
+  assert.equal(schemas.SearchFoodsOutputSchema.safeParse(result.structuredContent).success, true);
+  assert.equal(schemas.SearchFoodsOutputSchema.safeParse(text({ foods: { total_results: '0' } }).structuredContent).success, true);
+});

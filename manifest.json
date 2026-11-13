@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "fatsecret-mcp",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "MCP server for FatSecret API - food search, nutrition, diary, recipes, weight tracking (unofficial)",
   "author": {
     "name": "fliptheweb"
@@ -11,7 +11,7 @@
     "entry_point": "server/index.js",
     "mcp_config": {
       "command": "node",
-      "args": ["server/index.js"],
+      "args": ["${__dirname}/server/index.js"],
       "env": {
         "FATSECRET_CLIENT_ID": "${user_config.FATSECRET_CLIENT_ID}",
         "FATSECRET_CLIENT_SECRET": "${user_config.FATSECRET_CLIENT_SECRET}",

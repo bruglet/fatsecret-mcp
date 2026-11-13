@@ -755,7 +755,7 @@ const idDataSchema = (name: string) =>
     .passthrough();
 
 // Public API – Foods
-export const SearchFoodsOutputSchema = fatSecretOutput(FoodsSearchDataSchema);
+export const SearchFoodsOutputSchema = fatSecretOutput(z.union([FoodsSearchDataSchema, FoodsDataSchema]));
 export const GetFoodOutputSchema = fatSecretOutput(FoodDataSchema);
 export const FindFoodByBarcodeOutputSchema = fatSecretOutput(FoodDataSchema);
 export const AutocompleteFoodsOutputSchema = fatSecretOutput(
